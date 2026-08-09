@@ -17,14 +17,16 @@ fn usage() -> &'static str {
     r#"stegstr-cli — Stegstr command-line interface
 
 Usage:
-  stegstr-cli decode <image.png> [--decrypt]     Extract payload (optionally decrypt app-layer)
-  stegstr-cli detect <image.png>                 Decode + decrypt, print bundle JSON (same as decode --decrypt)
-  stegstr-cli embed <cover.png> -o <out.png> --payload <string|@file> [--encrypt] [--payload-base64]
+  stegstr-cli decode <image.png|.jpg> [--decrypt]  Extract payload (optionally decrypt app-layer)
+  stegstr-cli detect <image.png|.jpg>              Decode + decrypt, print bundle JSON (same as decode --decrypt)
+  stegstr-cli embed <cover> -o <out> --payload <string|@file> [--encrypt] [--payload-base64] [--robust|--robustness standard|max]
   stegstr-cli post "content" [--privkey-hex HEX] [--output bundle.json]  Create kind 1 note, output bundle JSON
 
 Decode:
   Writes payload to stdout. With --decrypt: decrypts Stegstr app-layer and prints bundle JSON.
   Without --decrypt: raw payload (JSON text or base64:<data>). Exit 0 on success.
+  Tries both encoders automatically (robust JPEG/QIM, then PNG/DWT) -- you don't
+  need to know which one produced an image you were sent.
 
 Detect:
   Decodes image and decrypts; prints Nostr bundle JSON { "version": 1, "events": [...] }.
@@ -34,7 +36,15 @@ Embed:
   --payload @<path>      Payload from file (e.g. --payload @bundle.json)
   --payload-base64 <b64> Payload as base64 string
   --encrypt              Encrypt with app key before embedding (any Stegstr user can detect)
-  -o, --output <path>    Output PNG path (required for embed)
+  -o, --output <path>    Output image path (required for embed; .png for default, .jpg for --robust)
+  --robust                Use the JPEG/QIM encoder: survives WhatsApp, Instagram, and Telegram
+                           recompression (validated in channel_simulator/). Output is a .jpg.
+                           Without this flag, embed uses the original PNG/DWT encoder, which does
+                           NOT survive being re-uploaded to any of those platforms.
+  --robustness <standard|max>
+                           Implies --robust. "standard" targets WhatsApp/Instagram/Telegram at
+                           higher output resolution; "max" (default when --robust is set) also
+                           survives Twitter/X-style aggressive downscaling.
 
 Post:
   Creates a kind 1 Nostr note with Stegstr suffix. Outputs bundle JSON to stdout or --output file.
@@ -101,7 +111,7 @@ fn run_decode(args: &[String]) -> Result<(), String> {
     }
     let path_str = image_path.ok_or("decode requires <image.png>")?;
     let path = Path::new(path_str);
-    let payload = stegstr_lib::stego::decode(path)?;
+    let payload = stegstr_lib::decode_any(path)?;
     let output = if decrypt && stegstr_lib::stego_crypto::is_encrypted_payload(&payload) {
         stegstr_lib::stego_crypto::decrypt_app(&payload)?
     } else if decrypt {
@@ -121,7 +131,7 @@ fn run_decode(args: &[String]) -> Result<(), String> {
 
 fn run_detect(image_path: &str) -> Result<(), String> {
     let path = Path::new(image_path);
-    let payload = stegstr_lib::stego::decode(path)?;
+    let payload = stegstr_lib::decode_any(path)?;
     let json = if stegstr_lib::stego_crypto::is_encrypted_payload(&payload) {
         stegstr_lib::stego_crypto::decrypt_app(&payload)?
     } else {
@@ -137,6 +147,8 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     let mut payload_str: Option<String> = None;
     let mut payload_base64: Option<String> = None;
     let mut encrypt = false;
+    let mut robust = false;
+    let mut robustness = stegstr_lib::stego_qim::Robustness::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -158,6 +170,17 @@ fn run_embed(args: &[String]) -> Result<(), String> {
             payload_base64 = Some(args.get(i).ok_or("missing value for --payload-base64")?.clone());
         } else if a == "--encrypt" {
             encrypt = true;
+        } else if a == "--robust" {
+            robust = true;
+        } else if a == "--robustness" {
+            i += 1;
+            let v = args.get(i).ok_or("missing value for --robustness (standard|max)")?;
+            robust = true;
+            robustness = match v.as_str() {
+                "standard" => stegstr_lib::stego_qim::Robustness::Standard,
+                "max" => stegstr_lib::stego_qim::Robustness::Max,
+                other => return Err(format!("unknown --robustness value: {other} (expected standard|max)")),
+            };
         } else if !a.starts_with('-') && cover.is_none() {
             cover = Some(a);
         }
@@ -165,7 +188,7 @@ fn run_embed(args: &[String]) -> Result<(), String> {
     }
 
     let cover_path = cover.ok_or("embed requires <cover.png>")?;
-    let output_path = output.ok_or("embed requires -o/--output <out.png>")?;
+    let output_path = output.ok_or("embed requires -o/--output <out.png|out.jpg>")?;
 
     let mut payload_bytes: Vec<u8> = if let Some(b64) = payload_base64 {
         base64::engine::general_purpose::STANDARD
@@ -182,8 +205,12 @@ fn run_embed(args: &[String]) -> Result<(), String> {
         payload_bytes = stegstr_lib::stego_crypto::encrypt_app(&plaintext)?;
     }
 
-    let png_bytes = stegstr_lib::stego::encode(Path::new(cover_path), &payload_bytes)?;
-    fs::write(output_path, png_bytes).map_err(|e| e.to_string())?;
+    let out_bytes = if robust {
+        stegstr_lib::stego_qim::encode(Path::new(cover_path), &payload_bytes, robustness)?
+    } else {
+        stegstr_lib::stego::encode(Path::new(cover_path), &payload_bytes)?
+    };
+    fs::write(output_path, out_bytes).map_err(|e| e.to_string())?;
     eprintln!("Wrote {}", output_path);
     Ok(())
 }

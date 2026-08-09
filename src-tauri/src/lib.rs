@@ -1,6 +1,7 @@
 pub mod stego;
 pub mod stego_crypto;
 pub mod stego_dot;
+pub mod stego_qim;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,19 @@ use std::time::Duration;
 /// Normalize path: strip file:// prefix if present (e.g. from some dialogs)
 fn normalize_path(s: &str) -> &str {
     s.trim_start_matches("file://")
+}
+
+/// Try both encoders: QIM (JPEG, DCT-domain -- survives WhatsApp/Instagram/
+/// Telegram recompression) first since it's cheap to rule out on a non-JPEG
+/// file, then fall back to DWT (PNG, spatial-domain -- does not survive
+/// recompression but is lossless if the image really was never re-encoded).
+/// A recipient doesn't know which encoder produced an image they were sent, so
+/// decode/detect must handle either transparently.
+pub fn decode_any(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    if let Ok(Some(payload)) = stego_qim::decode(path) {
+        return Ok(payload);
+    }
+    stego::decode(path)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

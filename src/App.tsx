@@ -637,12 +637,17 @@ function App({ profile }: { profile: string | null }) {
     .sort((a, b) => b.sortAt - a.sortAt);
 
   const publishViaRelay = useCallback((ev: NostrEvent) => {
-    if (relayRef.current) {
-      relayRef.current.publish(ev);
-    } else {
-      publishEvent(ev, relayUrls);
-    }
-  }, [relayUrls]);
+    const confirmed = relayRef.current ? relayRef.current.publish(ev) : publishEvent(ev, relayUrls);
+    confirmed
+      .then((count) => {
+        if (count === 0) {
+          toast.error("Could not reach any relay -- this post/message may not have sent. Check your connection and try again.");
+        }
+      })
+      .catch(() => {
+        toast.error("Failed to publish to relays.");
+      });
+  }, [relayUrls, toast]);
 
   useEffect(() => {
     const authors = Array.from(viewingPubkeys).filter((pk) => pk && /^[a-fA-F0-9]{64}$/.test(pk));
@@ -674,7 +679,8 @@ function App({ profile }: { profile: string | null }) {
       },
       () => setRelayStatus("Synced"),
       (err) => setRelayStatus("Error: " + (err instanceof Error ? err.message : String(err))),
-      relayUrls
+      relayUrls,
+      () => setRelayStatus("Reconnecting…")
     );
     const flush = () => {
       const batch = eventBufferRef.current;
