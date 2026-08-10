@@ -40,11 +40,18 @@ PROFILES: dict[ProfileName, ChannelProfile] = {
 
 
 def _resize_to_max_dim(img: Image.Image, max_width: int, method: str) -> Image.Image:
+    """Constrain by the LONGER side, matching real platforms (they cap the long
+    edge, not literally the width) -- a narrow-but-tall image (e.g. a cropped
+    screenshot) would otherwise never trigger a resize here even though every
+    real platform would still shrink it, silently understating how aggressive
+    real-world resizing is for portrait-oriented images.
+    """
     w, h = img.size
-    if w <= max_width:
+    long_side = max(w, h)
+    if long_side <= max_width:
         return img
-    ratio = max_width / w
-    new_w = max_width
+    ratio = max_width / long_side
+    new_w = max(1, round(w * ratio))
     new_h = max(1, round(h * ratio))
     resample = getattr(Image.Resampling, method, Image.Resampling.LANCZOS)
     return img.resize((new_w, new_h), resample=resample)

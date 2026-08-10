@@ -364,10 +364,18 @@ def encode_dct_qim(cover_path: str | Path, payload: bytes, quality: int = 0, rob
     tmp = None
     if cover_path.suffix.lower() in (".png", ".gif", ".bmp", ".jpg", ".jpeg"):
         img = Image.open(cover_path).convert("RGB")
-        if max_width > 0 and img.width > max_width:
-            ratio = max_width / img.width
+        long_side = max(img.width, img.height)
+        if max_width > 0 and long_side > max_width:
+            # Constrain by the LONGER side, matching real platforms (see
+            # channel.py's _resize_to_max_dim) -- a narrow-but-tall cover
+            # (e.g. a cropped screenshot) would otherwise sail through this
+            # pre-resize unshrunk just because its width alone looked safe,
+            # then get resized for real once a platform touches it, which is
+            # exactly the failure mode this pre-resize exists to prevent.
+            ratio = max_width / long_side
+            new_w = max(1, round(img.width * ratio))
             new_h = max(1, round(img.height * ratio))
-            img = img.resize((max_width, new_h), Image.Resampling.LANCZOS)
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         tmp = Path(tempfile.mktemp(suffix=".jpg"))
         img.save(tmp, "JPEG", quality=embed_quality, subsampling=0)
         jpeg_path = tmp
@@ -481,9 +489,22 @@ def decode_dct_qim(jpeg_bytes: bytes) -> bytes | None:
                 break
             if min(bit_margins[start:end]) < QIM_ERASURE_MARGIN:
                 erasures.append(idx)
+        decoded = None
         try:
             decoded = RSCodec(QIM_RS_NSYM).decode(codeword, erase_pos=erasures)[0]
         except Exception:
+            # Erasure marking is a heuristic (bytes near a QIM decision boundary)
+            # and can over-trigger on content with large low-AC-energy regions
+            # (flat colors, screenshots): most declared erasures may not
+            # actually be wrong, and declaring more than the RS codeword can
+            # correct fails outright even though the real bit-error rate is
+            # low enough for plain blind correction to succeed. Retry without
+            # erasure hints rather than giving up.
+            try:
+                decoded = RSCodec(QIM_RS_NSYM).decode(codeword, erase_pos=[])[0]
+            except Exception:
+                return None
+        if decoded is None:
             return None
         if len(decoded) < MAGIC_LEN + LENGTH_BYTES or decoded[:MAGIC_LEN] != MAGIC:
             return None

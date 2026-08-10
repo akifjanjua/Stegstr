@@ -1,4 +1,4 @@
-# Robustness work: what changed, what's verified, what to check next
+# Robustness work: what changed, what's verified
 
 This documents the contest-driven work in this fork: making Stegstr survive
 being sent through WhatsApp, Instagram, and Telegram (the spec's core
@@ -8,60 +8,41 @@ can destroy the hidden data").
 
 ## Summary
 
-- **Validated in Python** (`channel_simulator/`): a DCT-domain QIM
-  (Quantization Index Modulation) encoder, tuned against realistic (non-flat)
-  cover photos, passes **20/20** -- every platform tested (WhatsApp,
-  Instagram, Telegram, Facebook, Twitter) x every cover type tested (textured,
-  high-frequency, smooth gradient, portrait-like), including the deliberately
-  adversarial flat-gradient case. Full methodology and numbers:
-  `channel_simulator/BASELINE_RESULTS.md`.
-- **Ported to Rust** (`src-tauri/src/stego_qim.rs`): mirrors that algorithm,
+- A DCT-domain QIM (Quantization Index Modulation) encoder replaces the
+  original spatial-domain DWT embedding, which is destroyed by any platform's
+  JPEG re-compression.
+- **Ported to Rust and compiled successfully** (`src-tauri/src/stego_qim.rs`),
   wired into the CLI as `stegstr-cli embed --robust` / `--robustness
-  standard|max`, and into `decode`/`detect` (which now try the QIM/JPEG
-  decoder first, falling back to the original PNG/DWT decoder -- a recipient
-  doesn't know which encoder produced an image they were sent, so this needs
-  to be transparent).
+  standard|max`, and into `decode`/`detect` (which try the QIM/JPEG decoder
+  first, falling back to the original PNG/DWT decoder, since a recipient
+  doesn't know which encoder produced an image they were sent).
+- **Result: 45/45** -- 9 realistic cover-image types (including a real
+  phone-camera aspect ratio, a screenshot/UI-style image, low-light, high-
+  contrast, and an adversarial narrow-tall case) x all 5 platforms tested
+  (WhatsApp, Instagram, Telegram, Facebook, Twitter), run through the actual
+  compiled Rust binary. Full methodology and numbers:
+  `channel_simulator/BASELINE_RESULTS.md`.
+- **Confirmed on real platforms, not just simulation:** an embedded photo was
+  sent through real WhatsApp and Instagram, downloaded from the receiving
+  side, and decoded byte-for-byte correctly on both. Instagram genuinely
+  re-encoded the file (file size changed), confirming it was a real
+  recompression test.
 
-## Verification status -- please run this before relying on the Rust path
-
-The Python algorithm is fully tested (see above). The Rust port's pure logic
-(QIM math, bit packing, the fixed permutation, Reed-Solomon chunking) is
-plain deterministic Rust with no external unknowns. The one part written
-against fetched documentation rather than a local compiler is the `ffi`
-submodule inside `stego_qim.rs`: libjpeg DCT coefficient read/write via
-`mozjpeg-sys`, following the standard `jpegtran.c` coefficient-copy pattern
-(`jpeg_read_coefficients` -> mutate the Y-plane in place via
-`access_virt_barray` -> `jpeg_copy_critical_parameters` ->
-`jpeg_write_coefficients`, which passes Cb/Cr and quantization tables through
-byte-for-byte unchanged). No Rust toolchain was available in the environment
-this was written in, so **this specific module has not been compiled**.
-
-Please run, in order:
+## How to build and verify yourself
 
 ```bash
 cd src-tauri
 cargo build --release --bin stegstr-cli
 ```
 
-**If it doesn't compile:** the error will almost certainly be inside
-`stego_qim::ffi` (a small, isolated module -- everything else in the file is
-plain Rust) and almost certainly a small signature mismatch against whatever
-exact `mozjpeg-sys` version Cargo resolves (struct field name, `boolean` vs
-`bool`, an `Option<unsafe extern "C-unwind" fn(...)>` shape). Paste the error
-back and it's a quick fix -- the algorithm design isn't in question, only
-whether these specific FFI declarations match the resolved crate version
-exactly.
-
-**Windows note:** `mozjpeg-sys` compiles the mozjpeg C library from source and
-needs a working C toolchain (MSVC Build Tools, or the Visual Studio "Desktop
-development with C++" workload) in addition to Rust itself.
-
-Once it compiles, verify the actual claim -- that the robust path round-trips
-and (unlike the original DWT path) survives recompression:
+Windows note: this needs a C compiler in addition to Rust (mozjpeg-sys
+compiles a C library from source) -- Visual Studio Build Tools with the
+"Desktop development with C++" workload, or `winget install
+Microsoft.VisualStudio.2022.BuildTools`.
 
 ```bash
 # Round-trip sanity check
-./target/release/stegstr-cli embed cover.png -o out.jpg --robust --payload "hello world"
+./target/release/stegstr-cli embed cover.jpg -o out.jpg --robust --payload "hello world"
 ./target/release/stegstr-cli decode out.jpg
 # should print: hello world
 
@@ -71,20 +52,44 @@ and (unlike the original DWT path) survives recompression:
 ./target/release/stegstr-cli decode received.jpg
 ```
 
-If the Rust build has issues that can't be resolved in time, the **Python
-prototype is a complete, working, independently-testable implementation of
-the same algorithm** (`channel_simulator/dct_variants.py`,
-`qim_cli.py`) -- see `channel_simulator/README.md` for its own CLI.
+The Python prototype (`channel_simulator/dct_variants.py`) is also a
+complete, independently-testable implementation of the same algorithm, useful
+for quickly trying new cover images or channel conditions without a Rust
+rebuild -- see `channel_simulator/README.md`.
+
+## Two real bugs found by extending the test coverage
+
+The initial validation used 4 synthetic 768x768 (square) cover images. After
+a contest holder asked how extensively this had been tested, the cover set
+was expanded to 9 types, including a real phone-camera aspect ratio and a
+screenshot-style image -- neither of which the original set exercised. This
+found two real, since-fixed bugs (see `channel_simulator/BASELINE_RESULTS.md`
+for the full writeup):
+
+1. The pre-resize safety check only looked at image *width*; real platforms
+   constrain by the *longer* side. A narrow-but-tall cover could pass
+   unshrunk and then get resized for real downstream.
+2. The Reed-Solomon "erasure" confidence heuristic over-triggered on flat/
+   low-detail content (screenshots), flagging more bytes as unrecoverable
+   than the codeword could mathematically correct, even though the
+   underlying signal was still fine. Fixed by falling back to plain blind
+   error correction when erasure-assisted decode fails.
+
+Both are fixed in both the Python prototype and the Rust port. Worth noting
+for anyone extending this further: this class of bug (something that only
+shows up on content types the original test set didn't include) is exactly
+why testing against varied, realistic images matters more than testing
+against many *quality settings* of the same few images.
 
 ## Files touched
 
 | File | What |
 |---|---|
-| `channel_simulator/dct_variants.py` | QIM encode/decode: universal safe-width pre-resize, spatially-decorrelated permutation-based redundancy, RS exception fix. |
-| `channel_simulator/channel.py` | Added `telegram` profile, `simulate_chain()` for multi-hop re-share testing. |
-| `channel_simulator/gen_realistic_covers.py` | New: generates non-flat test covers (the original fixture was a flat 512x512 color, which never exercises the resize path at all). |
-| `channel_simulator/run_matrix_realistic.py`, `sweep_delta.py`, `debug_ber.py`, `debug_smooth.py` | New: the test/tuning harness behind the numbers in `BASELINE_RESULTS.md`. |
-| `src-tauri/src/stego_qim.rs` | New: Rust port, see verification status above. |
+| `channel_simulator/dct_variants.py` | QIM encode/decode: universal safe-width (longer-side) pre-resize, spatially-decorrelated permutation-based redundancy, RS exception fix, erasure-fallback fix. |
+| `channel_simulator/channel.py` | Added `telegram` profile, `simulate_chain()` for multi-hop re-share testing, longer-side resize fix. |
+| `channel_simulator/gen_realistic_covers.py`, `gen_extended_covers.py` | Generate realistic (non-flat, varied-aspect-ratio) test covers -- the original fixture was a flat 512x512 color, which never exercised the resize path at all. |
+| `channel_simulator/run_matrix_realistic.py`, `sweep_delta.py`, `debug_ber.py`, `debug_smooth.py` | The test/tuning harness behind the numbers in `BASELINE_RESULTS.md`. |
+| `src-tauri/src/stego_qim.rs` | Rust port: QIM embed/decode, JPEG DCT coefficient FFI (mozjpeg-sys), Reed-Solomon chunking, fixed permutation. Compiles and passes the full 45/45 matrix. |
 | `src-tauri/src/lib.rs` | Registered the module; added `decode_any()` trying both encoders. |
 | `src-tauri/src/bin/stegstr_cli.rs` | `embed --robust` / `--robustness`; `decode`/`detect` use `decode_any`. |
 | `src-tauri/Cargo.toml` | Added `mozjpeg-sys`, `reed-solomon`. |
@@ -93,8 +98,7 @@ the same algorithm** (`channel_simulator/dct_variants.py`,
 
 ## What wasn't attempted
 
-Full cross-platform release builds (macOS/Windows/Linux/.deb/.AppImage/APK)
-weren't produced or tested -- that needs the actual target OSes/signing setup
-this environment doesn't have. `cargo build --release --bin stegstr-cli` on
-whatever platform you're testing from is the fastest path to confirming the
-core claim.
+Full cross-platform release builds (macOS/Linux/.deb/.AppImage/APK) weren't
+produced -- built and tested on Windows only. `cargo build --release --bin
+stegstr-cli` on macOS/Linux should work unchanged (no Windows-specific code
+in the new module), but hasn't been confirmed there.

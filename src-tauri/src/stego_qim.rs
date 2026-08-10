@@ -288,7 +288,15 @@ fn wrap_payload(payload: &[u8]) -> Vec<u8> {
 }
 
 fn unwrap_payload(codeword: &[u8], erasures: &[usize]) -> Option<Vec<u8>> {
-    let decoded = rs::decode(codeword, QIM_RS_NSYM, erasures).ok()?;
+    // Erasure marking is a heuristic (bytes near a QIM decision boundary) and
+    // can over-trigger on content with large low-AC-energy regions (flat
+    // colors, screenshots): more bytes can get declared "erased" than the RS
+    // codeword can correct even though the real bit-error rate is low enough
+    // for plain blind correction to succeed on its own. Retry without erasure
+    // hints rather than giving up outright.
+    let decoded = rs::decode(codeword, QIM_RS_NSYM, erasures)
+        .or_else(|_| rs::decode(codeword, QIM_RS_NSYM, &[]))
+        .ok()?;
     if decoded.len() < MAGIC_LEN + LENGTH_BYTES || &decoded[..MAGIC_LEN] != MAGIC {
         return None;
     }
@@ -330,10 +338,18 @@ fn zigzag_rc(zi_offset_by_one: usize) -> (usize, usize) {
 pub fn encode(cover_path: &Path, payload: &[u8], robustness: Robustness) -> Result<Vec<u8>, String> {
     let img = image::open(cover_path).map_err(|e| e.to_string())?.to_rgb8();
     let max_w = robustness.max_width();
-    let img = if img.width() > max_w {
-        let ratio = max_w as f64 / img.width() as f64;
+    // Constrain by the LONGER side, matching real platforms (they cap the long
+    // edge, not literally the width). A narrow-but-tall cover (e.g. a cropped
+    // screenshot) would otherwise sail through this pre-resize unshrunk just
+    // because its width alone looked safe, then get resized for real once a
+    // platform touches it -- exactly the failure mode this pre-resize exists
+    // to prevent.
+    let long_side = img.width().max(img.height());
+    let img = if long_side > max_w {
+        let ratio = max_w as f64 / long_side as f64;
+        let new_w = ((img.width() as f64) * ratio).round().max(1.0) as u32;
         let new_h = ((img.height() as f64) * ratio).round().max(1.0) as u32;
-        image::imageops::resize(&img, max_w, new_h, image::imageops::FilterType::Lanczos3)
+        image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };

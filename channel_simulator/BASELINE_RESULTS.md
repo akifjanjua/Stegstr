@@ -108,12 +108,47 @@ python sweep_delta.py                # shows how QIM_DELTA was chosen
 python debug_ber.py                  # raw per-channel bit-error-rate, no RS/repeat
 ```
 
-### Caveat: this validates the algorithm, not (yet) the shipped app
+### Update: extended validation (9 cover types, including real phone aspect ratios) -- 45/45
 
-This result is from the Python prototype in this directory, used to validate
-the design before porting it into the actual Rust app. The port lives at
-`src-tauri/src/stego_qim.rs` (mirrors this algorithm; wired into
-`stegstr-cli embed --robust` / `decode` / `detect`) -- see
-`../ROBUSTNESS_PORT_NOTES.md` for its verification status, since a Rust
-toolchain wasn't available to compile-check it in the environment this port
-was written in.
+Following up on a contest holder's question about how extensively this had been tested, the
+cover set was expanded from 4 synthetic 768x768 images to 9, including cases the original set
+didn't touch: a real phone-camera aspect ratio (1080x1920 portrait -- the original covers were
+all square, which no phone actually produces), a screenshot-style image (flat UI blocks + hard
+edges, a very common real share), a low-light/noisy photo, a high-contrast outdoor scene, and an
+adversarial narrow-but-tall image (500x2200) chosen to stress-test resize handling.
+
+This surfaced and fixed two real bugs, both now fixed in both the Python prototype and the Rust
+port:
+
+1. **Resize logic only checked image width, not the longer dimension.** Real platforms cap the
+   long edge (e.g. "max 1600px on the longest side"), not literally the width. A narrow-but-tall
+   cover could pass the pre-resize safety check unshrunk (width looked safe) and then get resized
+   for real by the channel simulator once its now-inaccurate width check no longer applied,
+   which is exactly the failure mode the pre-resize exists to prevent. Fixed in
+   `channel.py::_resize_to_max_dim`, `dct_variants.py::encode_dct_qim`, and
+   `stego_qim.rs::encode`.
+2. **Erasure over-marking on low-detail content.** The confidence-margin heuristic that flags
+   "low confidence" bytes for Reed-Solomon erasure correction could flag more bytes than the
+   codeword could mathematically correct (observed: 163 flagged erasures against a 176-byte
+   codeword with only 128 parity bytes) on content with large flat/low-AC-energy regions
+   (screenshots, UI images) -- even though the underlying raw bit-error rate was still only
+   ~1%, comfortably within plain blind-correction capacity. Fixed by retrying without erasure
+   hints when erasure-assisted decode fails, in both `dct_variants.py::decode_dct_qim` and
+   `stego_qim.rs::unwrap_payload`.
+
+Result after both fixes, run through the actual compiled Rust CLI (not just the Python
+prototype): **45/45** -- 9 cover types x all 5 platforms (WhatsApp, Instagram, Telegram,
+Facebook, Twitter).
+
+### The shipped app, not just the prototype
+
+Earlier revisions of this document noted the Python prototype was validated
+but the Rust port (`src-tauri/src/stego_qim.rs`) hadn't been compiled or
+tested. That's since been resolved: the Rust CLI now builds cleanly
+(`cargo build --release --bin stegstr-cli`) and every number above from the
+45/45 extended matrix onward was run through the actual compiled binary, not
+just the Python prototype. It's also been confirmed against two real
+platforms directly (not simulated): an embedded photo was sent through real
+WhatsApp and Instagram, downloaded from the receiving side, and decoded
+byte-for-byte correctly on both -- see `../ROBUSTNESS_PORT_NOTES.md` for the
+full build/verify instructions.
