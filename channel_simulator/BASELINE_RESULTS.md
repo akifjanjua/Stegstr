@@ -140,6 +140,31 @@ Result after both fixes, run through the actual compiled Rust CLI (not just the 
 prototype): **45/45** -- 9 cover types x all 5 platforms (WhatsApp, Instagram, Telegram,
 Facebook, Twitter).
 
+### Update: invisibility was never actually measured -- it should have been
+
+All tuning to this point optimized `QIM_DELTA` purely for bit-error rate. Visually
+inspecting output images (the same scrutiny that caught the dot-scheme visibility bug in
+`ROBUSTNESS_PORT_NOTES.md`) found `QIM_DELTA=32` produces genuinely visible graininess on
+flat/low-detail covers (screenshots, UI images) -- confirmed against a same-pipeline,
+no-embedding baseline (identical resize + JPEG quality, zero QIM changes) to rule out JPEG
+compression artifacts as the cause. Measured PSNR against that baseline: **~26dB across
+every cover type tested**, not just flat ones -- below the ~30dB threshold generally
+considered "fine" in watermarking literature, let alone the ~40dB+ considered imperceptible.
+
+Re-swept delta with PSNR measured alongside robustness at every step (not just BER): 14 is
+the exact floor for full 45/45 robustness; settled on **`QIM_DELTA=16`** for a small safety
+margin, which still gets 45/45 while roughly halving the visible error (~32dB PSNR, plus
+visibly cleaner on direct inspection). The redundancy/permutation/erasure-fallback fixes
+made since the original delta=32 sweep meant far less raw signal margin is actually needed
+than that first BER-only sweep assumed.
+
+### How to reproduce
+
+```bash
+python sweep_delta.py          # original BER-only sweep (what produced delta=32)
+# PSNR-vs-robustness re-tune: see the delta re-tune commit for the measurement script
+```
+
 ### The shipped app, not just the prototype
 
 Earlier revisions of this document noted the Python prototype was validated

@@ -64,11 +64,15 @@ const ZIGZAG_2D: [(usize, usize); 64] = [
 /// Mid-frequency AC zigzag indices used for embedding (skip DC at 0).
 const AC_COUNT: usize = 24;
 
-/// Swept empirically against realistic (non-flat) photos; see
-/// channel_simulator/sweep_delta.py. Below ~26 the worst-case per-bit error rate
-/// on textured/high-frequency content climbs fast; above ~36 returns diminish and
-/// visible distortion grows.
-const QIM_DELTA: f64 = 32.0;
+/// Re-tuned after adding PSNR measurement to the validation (the original 32
+/// was chosen from bit-error-rate alone, without ever checking visual impact --
+/// it scored only ~26dB PSNR against the same-pipeline no-embed baseline, which
+/// is genuinely visible, not just "technically imperfect"). 14 is the exact
+/// floor for full 45/45 robustness across all 9 cover types x 5 platforms; 16
+/// keeps a small margin above that floor at ~32dB PSNR, a real quality
+/// improvement with no robustness cost. See channel_simulator/sweep_delta.py
+/// for the original BER-only sweep.
+const QIM_DELTA: f64 = 16.0;
 const QIM_RS_NSYM: usize = 128;
 const QIM_REPEAT: usize = 5;
 const QIM_EMBED_QUALITY: u8 = 80;
@@ -565,6 +569,19 @@ mod ffi {
     /// need to keep the libjpeg session alive afterward (see write_y_coefficients,
     /// which re-opens the same file for the actual in-place-mutation write path).
     pub fn read_y_coefficients(path: &Path) -> Result<YCoefficients, String> {
+        // libjpeg reports "this isn't a JPEG" through the same error_exit path
+        // (-> panic, see below) as genuinely unexpected internal errors, but
+        // "the file the user picked isn't a JPEG" is a routine, expected
+        // outcome here -- decode is deliberately tried against arbitrary
+        // files (see decode_any in lib.rs). Checking the SOI marker ourselves
+        // first avoids ever entering libjpeg -- and printing a scary (if
+        // harmless; catch_unwind below does prevent an actual crash) "thread
+        // panicked" message -- for the common case of a non-JPEG or empty
+        // file, which is not a bug, just normal input.
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+            return Err("Not a JPEG file".to_string());
+        }
         std::panic::catch_unwind(|| read_y_coefficients_inner(path))
             .map_err(|_| "libjpeg error while reading coefficients".to_string())?
     }

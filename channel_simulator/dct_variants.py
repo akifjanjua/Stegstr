@@ -42,9 +42,15 @@ from dct_stego import (
 TCM_AC_COUNT = 16
 TCM_RS_NSYM = 48
 RS64_NSYM = 64
-QIM_DELTA = 32  # Swept empirically against realistic (non-flat) photos; see sweep_delta.py.
-                # Below ~26 the worst-case per-bit error rate on textured/high-frequency
-                # content climbs fast; above ~36 returns diminish and visible distortion grows.
+QIM_DELTA = 16  # Re-tuned after adding PSNR measurement to the validation (the original
+                # 32 was chosen from bit-error-rate alone, without ever checking visual
+                # impact -- it scored only ~26dB PSNR against the same-pipeline no-embed
+                # baseline, which is genuinely visible, not just "technically imperfect").
+                # 14 is the exact floor for full 45/45 robustness across all 9 cover types
+                # x 5 platforms; 16 keeps a small margin above that floor at ~32dB PSNR,
+                # a real improvement with no robustness cost. See sweep_delta.py for the
+                # original BER-only sweep and the delta re-tune in git history/PR notes for
+                # the PSNR-aware follow-up.
 QIM_RS_NSYM = 128  # Stronger parity for harsh channels (WhatsApp)
 QIM_REPEAT = 5  # Swept; 7 was tried and performed slightly worse in practice (more
                 # votes drawn from farther/less-favorable permutation positions) --

@@ -1428,12 +1428,12 @@ function App({ profile }: { profile: string | null }) {
     if (isWeb()) return;
     try {
       const tauri = await getTauri();
-      const path = await tauri.invoke<string>("get_exchange_path");
+      const path = await tauri.invoke<string>(embedMethod === "qim" ? "get_exchange_path_qim" : "get_exchange_path");
       handleLoadFromImage(path);
     } catch (e) {
       setDecodeError(e instanceof Error ? e.message : String(e));
     }
-  }, [handleLoadFromImage]);
+  }, [handleLoadFromImage, embedMethod]);
 
   const handleEmbedToExchange = useCallback(async () => {
     if (isWeb() || !profile) return;
@@ -1450,23 +1450,26 @@ function App({ profile }: { profile: string | null }) {
         setDetecting(false);
         return;
       }
-      const outputPath = await tauri.invoke<string>("get_exchange_path");
+      const useQim = embedMethod === "qim";
+      const outputPath = await tauri.invoke<string>(useQim ? "get_exchange_path_qim" : "get_exchange_path");
       const bundle: NostrStateBundle = { version: STEGSTR_BUNDLE_VERSION, events };
       const jsonString = JSON.stringify(bundle);
       const encrypted = await stegoCrypto.encryptOpen(jsonString);
       const payloadToEmbed = "base64:" + uint8ArrayToBase64(encrypted);
-      const cmd = "encode_stego_dot";
+      const cmd = useQim ? "encode_stego_qim" : "encode_stego_dot";
       const result = await tauri.invoke<{ ok: boolean; path?: string; error?: string }>(cmd, {
         coverPath,
         outputPath,
         payload: payloadToEmbed,
       });
       if (result.ok && result.path) {
-        try {
-          const isPng = await tauri.invoke<boolean>("check_png_signature", { path: result.path });
-          addStegoLog(`PNG signature check: ${isPng ? "OK" : "FAIL"}`);
-        } catch (e) {
-          addStegoLog(`PNG signature check error: ${e instanceof Error ? e.message : String(e)}`);
+        if (!useQim) {
+          try {
+            const isPng = await tauri.invoke<boolean>("check_png_signature", { path: result.path });
+            addStegoLog(`PNG signature check: ${isPng ? "OK" : "FAIL"}`);
+          } catch (e) {
+            addStegoLog(`PNG signature check error: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
         addStegoLog(`Saved to: ${result.path}`);
         setStatus(`Saved to exchange. B can click Detect from exchange.`);
