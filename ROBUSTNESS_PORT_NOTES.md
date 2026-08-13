@@ -27,6 +27,44 @@ can destroy the hidden data").
   side, and decoded byte-for-byte correctly on both. Instagram genuinely
   re-encoded the file (file size changed), confirming it was a real
   recompression test.
+- **Fixed the desktop app's actual Embed button, not just the CLI.** The GUI
+  already had an `embedMethod` setting defaulting to `"qim"`, but the desktop
+  (Tauri) code path ignored it and unconditionally called the "dot" scheme
+  instead -- a spatial-domain method that paints literal high-contrast pixel
+  dots into the image. Those dots are plainly visible on screen (see below),
+  which fails the spec's steganographic-invisibility requirement outright,
+  regardless of how well it survives recompression. This was only ever
+  respected in the separate browser/web build's code path. Now fixed: the
+  desktop app's Embed button uses the same validated QIM encoder as the CLI.
+
+## A second bug this audit found: the GUI's actual default was visibly detectable
+
+Testing the CLI thoroughly doesn't prove the *app* is correct if the app's
+real button doesn't call the code that was tested. Auditing what the Embed
+button actually invokes (`grep` for `tauri.invoke` call sites in `App.tsx`,
+not just what the state variable claims) found two real problems layered on
+top of each other:
+
+1. `encode_stego_qim` / `decode_stego_qim` (the Tauri commands) shelled out to
+   `python3 channel_simulator/qim_cli.py` at runtime -- meaning even calling
+   them would have required end users to have Python plus `pip install
+   jpeglib reedsolo numpy` installed, not viable for a one-click-install
+   desktop app. Fixed: both now call `stego_qim::encode`/`decode` directly,
+   native Rust, no external interpreter.
+2. Even so, nothing called them: the desktop embed flow unconditionally used
+   `encode_stego_dot` regardless of the `embedMethod` UI setting. The dot
+   scheme paints literal 2x2 black-and-white pixel patterns at regularly
+   spaced positions across the image to survive recompression via raw
+   contrast rather than DCT-domain redundancy -- which does mostly work for
+   survival (4/5 simulated platforms), but the pattern is plainly visible on
+   screen, which is disqualifying on its own per the spec ("the hidden data
+   must be undetectable through normal viewing or casual inspection").
+
+Fixed by making the desktop flow branch on `embedMethod` the same way the web
+build already did, and giving `get_qim_capacity` a Rust-native implementation
+so the UI can size payloads correctly for either method. QIM remains the
+default; "dot" is still selectable in the UI for anyone who wants it, now
+with an accurate understanding of the invisibility tradeoff involved.
 
 ## How to build and verify yourself
 
@@ -89,12 +127,12 @@ against many *quality settings* of the same few images.
 | `channel_simulator/channel.py` | Added `telegram` profile, `simulate_chain()` for multi-hop re-share testing, longer-side resize fix. |
 | `channel_simulator/gen_realistic_covers.py`, `gen_extended_covers.py` | Generate realistic (non-flat, varied-aspect-ratio) test covers -- the original fixture was a flat 512x512 color, which never exercised the resize path at all. |
 | `channel_simulator/run_matrix_realistic.py`, `sweep_delta.py`, `debug_ber.py`, `debug_smooth.py` | The test/tuning harness behind the numbers in `BASELINE_RESULTS.md`. |
-| `src-tauri/src/stego_qim.rs` | Rust port: QIM embed/decode, JPEG DCT coefficient FFI (mozjpeg-sys), Reed-Solomon chunking, fixed permutation. Compiles and passes the full 45/45 matrix. |
-| `src-tauri/src/lib.rs` | Registered the module; added `decode_any()` trying both encoders. |
+| `src-tauri/src/stego_qim.rs` | Rust port: QIM embed/decode, JPEG DCT coefficient FFI (mozjpeg-sys), Reed-Solomon chunking, fixed permutation, longer-side resize fix, erasure-fallback fix, new `capacity_bytes()` for the UI. Compiles and passes the full 45/45 matrix. |
+| `src-tauri/src/lib.rs` | Registered the module; added `decode_any()` trying both encoders; `encode_stego_qim`/`decode_stego_qim` rewritten to call `stego_qim` directly instead of shelling out to `python3`; new `get_qim_capacity` command. |
 | `src-tauri/src/bin/stegstr_cli.rs` | `embed --robust` / `--robustness`; `decode`/`detect` use `decode_any`. |
 | `src-tauri/Cargo.toml` | Added `mozjpeg-sys`, `reed-solomon`. |
 | `src/relay.ts` | Reconnection with exponential backoff on drop (previously: a dropped connection just stayed dead); `publish()` now resolves with a confirmed-relay count instead of firing blind, so callers can tell a post/DM actually reached a relay. |
-| `src/App.tsx` | Surfaces publish failures via the existing toast system instead of failing silently; shows "Reconnecting…" relay status. |
+| `src/App.tsx` | Surfaces publish failures via the existing toast system instead of failing silently; shows "Reconnecting…" relay status; **desktop Embed flow now actually respects `embedMethod`** (previously hardcoded to the visibly-detectable "dot" scheme regardless of the UI setting). |
 
 ## What wasn't attempted
 

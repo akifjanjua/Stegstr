@@ -333,6 +333,37 @@ fn zigzag_rc(zi_offset_by_one: usize) -> (usize, usize) {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Conservative estimate of how many raw payload bytes a cover image can hold
+/// after the safety pre-resize, so callers (the UI) can trim an oversized
+/// payload before attempting an embed rather than just trying and failing.
+/// Slightly under-estimates real capacity (doesn't perfectly model RS chunk
+/// boundaries), which is the safe direction to be wrong in here.
+pub fn capacity_bytes(cover_path: &Path, robustness: &Robustness) -> Result<usize, String> {
+    let img = image::open(cover_path).map_err(|e| e.to_string())?;
+    let max_w = robustness.max_width();
+    let long_side = img.width().max(img.height());
+    let (w, h) = if long_side > max_w {
+        let ratio = max_w as f64 / long_side as f64;
+        (
+            ((img.width() as f64) * ratio).round().max(1.0) as u32,
+            ((img.height() as f64) * ratio).round().max(1.0) as u32,
+        )
+    } else {
+        (img.width(), img.height())
+    };
+    let blocks_wide = (w / 8).max(1) as usize;
+    let blocks_high = (h / 8).max(1) as usize;
+    let total_coeffs = blocks_wide * blocks_high * AC_COUNT;
+    let header_slots = QIM_HEADER_BITS * QIM_HEADER_REPEAT;
+    let usable = total_coeffs.saturating_sub(header_slots);
+    let codeword_bits_max = usable / QIM_REPEAT;
+    let codeword_bytes_max = codeword_bits_max / 8;
+    // Reed-Solomon: ~(255-nsym)/255 of each chunk is usable data.
+    let rs_data_ratio_num = 255usize.saturating_sub(QIM_RS_NSYM);
+    let raw_bytes_max = codeword_bytes_max * rs_data_ratio_num / 255;
+    Ok(raw_bytes_max.saturating_sub(MAGIC_LEN + LENGTH_BYTES))
+}
+
 /// Embed `payload` into `cover_path` (any image format the `image` crate reads),
 /// returning JPEG bytes. See module docs for the robustness rationale.
 pub fn encode(cover_path: &Path, payload: &[u8], robustness: Robustness) -> Result<Vec<u8>, String> {
