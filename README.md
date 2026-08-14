@@ -13,18 +13,19 @@ Both use the same steganographic format. Data is stored and processed **locally*
 
 ### Graphical app (UI)
 
-Download the latest release for your platform:
-
-- [macOS](https://github.com/brunkstr/Stegstr/releases/latest/download/Stegstr-macOS.dmg) · [Windows](https://github.com/brunkstr/Stegstr/releases/latest/download/Stegstr-Windows.exe) · [Linux](https://github.com/brunkstr/Stegstr/releases/latest/download/Stegstr-Linux.deb) / [AppImage](https://github.com/brunkstr/Stegstr/releases/latest/download/Stegstr-Linux.AppImage)
-
-See [Releases](https://github.com/brunkstr/Stegstr/releases) for other builds and Android.
+This fork doesn't have pre-built release binaries yet (no CI release pipeline set
+up here) — build from source instead, see "Build from source (full app)" below.
+(The links a reader might expect here for pre-built downloads would point at the
+upstream project's releases, which do **not** include the fixes in this fork --
+see [`ROBUSTNESS_PORT_NOTES.md`](ROBUSTNESS_PORT_NOTES.md) for what changed and why
+building from this fork specifically matters.)
 
 ### Command-line interface (CLI)
 
 You need [Rust](https://rustup.rs) (latest stable). Clone and build the CLI:
 
 ```bash
-git clone https://github.com/brunkstr/Stegstr.git
+git clone https://github.com/akifjanjua/Stegstr.git
 cd Stegstr
 cd src-tauri && cargo build --release --bin stegstr-cli
 ```
@@ -42,7 +43,7 @@ Binary: `target/release/stegstr-cli` (Windows: `stegstr-cli.exe`). Example:
 Prerequisites: Node.js 18+, Rust (latest stable).
 
 ```bash
-git clone https://github.com/brunkstr/Stegstr.git
+git clone https://github.com/akifjanjua/Stegstr.git
 cd Stegstr
 npm install
 npm run build:mac   # or build:win, build:linux
@@ -52,9 +53,10 @@ See the repo for platform-specific build deps (e.g. Xcode CLI tools, Visual Stud
 
 ## Links
 
-- [Website](https://stegstr.com) — Downloads, getting started, wiki
+- [Website](https://stegstr.com) — Downloads, getting started, wiki (this is the original upstream project's site, not this fork's)
 - [Wiki / CLI docs](https://stegstr.com/wiki/cli.html) — Full CLI reference
-- [Releases](https://github.com/brunkstr/Stegstr/releases)
+- [This fork's source](https://github.com/akifjanjua/Stegstr)
+- [What changed in this fork and why](ROBUSTNESS_PORT_NOTES.md)
 
 ## License
 
