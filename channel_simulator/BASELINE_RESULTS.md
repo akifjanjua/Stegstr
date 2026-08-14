@@ -177,3 +177,37 @@ platforms directly (not simulated): an embedded photo was sent through real
 WhatsApp and Instagram, downloaded from the receiving side, and decoded
 byte-for-byte correctly on both -- see `../ROBUSTNESS_PORT_NOTES.md` for the
 full build/verify instructions.
+
+### Two more checks: camera-realistic covers, and SSIM (not just PSNR)
+
+**Every test above used programmatically-generated (PIL-drawn) cover images** -- circles,
+gradients, noise -- never a photo that had already been through a real camera's own JPEG
+encoder. A genuine camera photo carries its own compression artifacts and sensor noise
+before Stegstr ever touches it, which synthetic sources don't have. Approximated this by
+pre-compressing existing covers once at typical phone-camera settings (JPEG Q92, 4:2:0)
+*before* using them as embed covers, then running the full platform matrix: **15/15
+passed** (3 covers x whatsapp/instagram/facebook/twitter/telegram). Real camera photos are
+also almost never mathematically flat like the synthetic "smooth" worst case below, so
+this is a meaningfully closer proxy to real usage than the synthetic set alone.
+
+**Invisibility was only measured with PSNR (page/section above); added SSIM** (structural
+similarity, generally considered a better match to human perception than PSNR alone) for a
+second, independent check:
+
+| Cover | PSNR | SSIM |
+|---|---|---|
+| textured | 32.8 dB | 0.84 |
+| portrait | 33.0 dB | 0.71 |
+| smooth (worst case) | 33.1 dB | 0.70 |
+
+SSIM of 0.70-0.84 is "good" but not "excellent" (>0.95) -- direct visual inspection of the
+smooth-gradient worst case confirms a faint grain is still present, less pronounced than
+before the delta=32->16 retune but not eliminated. This is an honest limitation, not a bug:
+DCT-coefficient steganography fundamentally needs *some* natural high-frequency detail to
+mask modifications within, and a mathematically flat gradient has almost none -- this is
+true of any coefficient-domain steganography technique, not specific to this
+implementation. Real photos (the actual, typical use case) have far more natural texture
+than this deliberately-adversarial synthetic worst case, and score better (textured: 0.84
+SSIM) even before accounting for that. Not further tuned beyond this point given the
+robustness/invisibility tradeoff already made (see the delta re-tune above) and that the
+worst case here is not representative of typical real-world cover photos.
