@@ -114,35 +114,157 @@ fn bits_to_bytes(b: &[bool]) -> Vec<u8> {
         .collect()
 }
 
+/// Inclusive range of lh values that reconstruct all four pixels of a block to
+/// within [0, 255] (no clamping in `haar2d_inverse`). `lh_min > lh_max` means
+/// no lh value at all avoids clamping for this block.
+fn lh_bounds(ll: i32, hl: i32, hh: i32) -> (i32, i32) {
+    let lh_min = (ll - hl - hh - 255)
+        .max(hl - ll - hh)
+        .max(ll + hl + hh - 255)
+        .max(hh - ll - hl);
+    let lh_max = (ll - hl - hh)
+        .min(255 - ll + hl - hh)
+        .min(ll + hl + hh)
+        .min(255 - ll - hl + hh);
+    (lh_min, lh_max)
+}
+
+/// Is there an integer lh with the given LSB parity inside `lh_bounds`?
+/// Depends only on (ll, hl, hh) -- never on the block's actual/natural lh --
+/// so encoder and decoder always agree on the answer for any block neither
+/// side has distorted, letting decode replicate encode's slot allocation with
+/// no side channel.
+fn feasible_for_bit(bit: i32, ll: i32, hl: i32, hh: i32) -> bool {
+    let (lh_min, lh_max) = lh_bounds(ll, hl, hh);
+    if lh_min > lh_max {
+        return false;
+    }
+    let mut lh = lh_min;
+    if (lh & 1) != bit {
+        lh += 1;
+    }
+    lh <= lh_max
+}
+
+/// A block can only safely carry a payload bit if BOTH possible bit values are
+/// individually representable there without clamping -- otherwise the specific
+/// bit this block ends up needing depends on payload content, which decode has
+/// no way to know in advance. `embed_in_tile`/`decode_from_tile` both skip any
+/// block where this is false, in the same deterministic block order, so the
+/// two sides never disagree about which blocks carry data.
+fn both_bits_feasible(ll: i32, hl: i32, hh: i32) -> bool {
+    feasible_for_bit(0, ll, hl, hh) && feasible_for_bit(1, ll, hl, hh)
+}
+
+/// For a block NOT carrying a payload bit, still choose an lh inside
+/// `lh_bounds` (closest to the natural value) whenever one exists, instead of
+/// leaving lh untouched.
+///
+/// This matters even though no payload data lives here: if the block's own
+/// natural lh happens to fall outside `lh_bounds` too, `haar2d_inverse` would
+/// clamp it anyway, and that clamp shifts the (ll, hl, hh) decode recomputes
+/// for this block away from what encode saw. `both_bits_feasible` depends on
+/// exactly those values, so encode and decode would then disagree about
+/// whether this block was skipped or used -- corrupting every bit that comes
+/// after it once the two sides' slot sequences fall out of sync (BUGS.md #3).
+/// A block where `lh_bounds` is empty (`lh_min > lh_max`, no lh at all avoids
+/// clamping) is the one residual case this can't fix; that's a strictly
+/// smaller, unavoidable-under-any-choice condition.
+fn safe_lh_for_unused_block(orig_lh: i32, ll: i32, hl: i32, hh: i32) -> i32 {
+    let (lh_min, lh_max) = lh_bounds(ll, hl, hh);
+    if lh_min > lh_max {
+        return orig_lh;
+    }
+    orig_lh.clamp(lh_min, lh_max)
+}
+
+/// Choose the lh (LH coefficient) value closest to `orig_lh` that (a) has the
+/// requested LSB parity and (b) reconstructs all four pixels in a block to
+/// within [0, 255] with NO clamping in `haar2d_inverse`.
+///
+/// Forward-then-inverse on this Haar2D pair is algebraically exact (the /4
+/// truncation in `haar2d_forward` divides evenly back out) as long as the
+/// reconstructed a/b/c/d never need clamping -- clamping is the only lossy
+/// step. `(orig_lh & !1) | bit` (the previous, unguarded choice) only ever
+/// moves lh by at most 1 from its natural value, but that's enough to push a
+/// reconstructed pixel out of [0,255] whenever the true pixel was already
+/// within 1 of 0 or 255 -- common on high-contrast/random image data. When
+/// that happens the clamp silently changes the pixel, which flips the
+/// recovered LSB back on decode and corrupts the payload with no error ever
+/// surfacing. Searching outward in steps of 2 (the smallest step that
+/// preserves parity) finds a nearby lh that reconstructs cleanly instead.
+fn pick_safe_lh(orig_lh: i32, bit: i32, ll: i32, hl: i32, hh: i32) -> i32 {
+    let in_range = |lh: i32| -> bool {
+        let a = ll - lh - hl - hh;
+        let b = ll + lh - hl + hh;
+        let c = ll - lh + hl + hh;
+        let d = ll + lh + hl - hh;
+        (0..=255).contains(&a) && (0..=255).contains(&b) && (0..=255).contains(&c) && (0..=255).contains(&d)
+    };
+    let base = (orig_lh & !1) | bit;
+    if in_range(base) {
+        return base;
+    }
+    for step in 1..=64 {
+        let up = base + step * 2;
+        if in_range(up) {
+            return up;
+        }
+        let down = base - step * 2;
+        if in_range(down) {
+            return down;
+        }
+    }
+    base
+}
+
 /// Embed payload into a single tile (raw RGBA). Tile must be even dimensions.
+///
+/// Skips any block where `both_bits_feasible` is false (see that function):
+/// forcing a bit there would need `haar2d_inverse` to clamp, which silently
+/// flips the LSB back on decode (BUGS.md #3). `decode_from_tile` below skips
+/// the exact same blocks, computed the same way, so the two sides never
+/// disagree about which blocks carry data despite no side channel between
+/// them -- which also means EVERY block, not just ones that ran out of
+/// payload bits, must get a clamp-free lh (`safe_lh_for_unused_block`): a
+/// clamp on any block, used or not, drifts that block's (ll, hl, hh) and can
+/// flip its `both_bits_feasible` classification out from under decode.
 fn embed_in_tile(raw: &[u8], tw: u32, th: u32, to_embed: &[u8]) -> Result<Vec<u8>, String> {
     let bits_needed = to_embed.len() * 8;
     let half_w = (tw / 2) as usize;
     let half_h = (th / 2) as usize;
     let blocks_per_channel = half_w * half_h;
-    let bits_per_channel = blocks_per_channel;
     let total_bits_available = blocks_per_channel * 3;
     if bits_needed > total_bits_available {
         return Err(format!(
-            "Tile too small: need {} bits, have {}",
+            "Tile too small: need {} bits, have {} (upper bound)",
             bits_needed, total_bits_available
         ));
     }
     let mut out_raw = raw.to_vec();
+    let mut bit_cursor = 0usize;
     for ch in 0..3 {
         let (ll, lh, hl, hh) = haar2d_forward(&out_raw, tw, th, ch);
-        let mut lh_mod = lh;
+        let mut lh_mod = lh.clone();
         for block_idx in 0..blocks_per_channel {
-            let global_idx = ch * bits_per_channel + block_idx;
-            if global_idx >= bits_needed {
-                break;
+            let (ll_b, hl_b, hh_b) = (ll[block_idx], hl[block_idx], hh[block_idx]);
+            if bit_cursor < bits_needed && both_bits_feasible(ll_b, hl_b, hh_b) {
+                let byte_idx = bit_cursor / 8;
+                let bit_in_byte = 7 - (bit_cursor % 8);
+                let bit = (to_embed[byte_idx] >> bit_in_byte) & 1;
+                lh_mod[block_idx] = pick_safe_lh(lh[block_idx], bit as i32, ll_b, hl_b, hh_b);
+                bit_cursor += 1;
+            } else {
+                lh_mod[block_idx] = safe_lh_for_unused_block(lh[block_idx], ll_b, hl_b, hh_b);
             }
-            let byte_idx = global_idx / 8;
-            let bit_in_byte = 7 - (global_idx % 8);
-            let bit = (to_embed[byte_idx] >> bit_in_byte) & 1;
-            lh_mod[block_idx] = (lh_mod[block_idx] & !1) | (bit as i32);
         }
         haar2d_inverse(&mut out_raw, tw, th, ch, &ll, &lh_mod, &hl, &hh);
+    }
+    if bit_cursor < bits_needed {
+        return Err(format!(
+            "Tile too small: need {} bits, only {} usable slots (some blocks skipped as unsafe to modify)",
+            bits_needed, bit_cursor
+        ));
     }
     Ok(out_raw)
 }
@@ -155,16 +277,18 @@ fn decode_from_tile(raw: &[u8], tw: u32, th: u32) -> Result<Vec<u8>, String> {
     let half_w = (tw / 2) as usize;
     let half_h = (th / 2) as usize;
     let blocks_per_channel = half_w * half_h;
-    let total_bits = blocks_per_channel * 3;
-    if total_bits < 88 {
-        return Err("Tile too small".to_string());
-    }
-    let mut bits = Vec::with_capacity(total_bits);
+    let mut bits = Vec::with_capacity(blocks_per_channel * 3);
     for ch in 0..3 {
-        let (_, lh, _, _) = haar2d_forward(raw, tw, th, ch);
+        let (ll, lh, hl, hh) = haar2d_forward(raw, tw, th, ch);
         for block_idx in 0..blocks_per_channel {
+            if !both_bits_feasible(ll[block_idx], hl[block_idx], hh[block_idx]) {
+                continue;
+            }
             bits.push((lh[block_idx] & 1) != 0);
         }
+    }
+    if bits.len() < 88 {
+        return Err("Tile too small".to_string());
     }
     for start in 0..bits.len().saturating_sub(88) {
         let slice = &bits[start..start + MAGIC_LEN * 8];
@@ -263,7 +387,23 @@ pub fn encode(image_path: &std::path::Path, payload: &[u8]) -> Result<Vec<u8>, S
 }
 
 /// Decode payload from DWT-embedded image.
-/// Tries full-image decode first (backward compat), then sliding 256x256 window for crop survival.
+/// Tries tile-grid-aligned windows first (matches how `encode()` actually tiles
+/// images >= TILE_SIZE into independent 256x256 Haar2D transforms), then falls
+/// back to a whole-image transform for images smaller than one tile or for the
+/// rare case where `encode()` itself fell back to a whole-image transform
+/// because no single tile had capacity for the payload.
+///
+/// BUG (fixed): this used to try the whole-image transform first. For any image
+/// >= TILE_SIZE, a whole-image Haar2D transform indexes LH coefficients by the
+/// image's full width, not each tile's own 256-wide local grid the encoder used.
+/// The two orderings only agree for the first 128 bits (one tile-local row), so
+/// once a payload's header+data spans more than one row (> ~9 payload bytes)
+/// the whole-image bit sequence silently diverges from what was actually
+/// embedded. `decode_from_tile`'s magic search has no integrity check beyond
+/// "declared length fits available bits", so it returned a magic-shaped but
+/// corrupted match instead of ever reaching the tile-aligned search below,
+/// which does reproduce the exact per-tile transform and always decodes
+/// correctly for any un-cropped image >= TILE_SIZE.
 pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
     let img_rgba = load_image_with_orientation(image_path)?;
     let img_rgba = ensure_even_dimensions(&img_rgba);
@@ -272,10 +412,6 @@ pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
         return Err("Image too small or dimensions not even".to_string());
     }
     let raw = img_rgba.as_raw();
-
-    if let Ok(payload) = decode_from_tile(raw, w, h) {
-        return Ok(payload);
-    }
 
     if w >= TILE_SIZE && h >= TILE_SIZE {
         for oy in (0..=h.saturating_sub(TILE_SIZE)).step_by(DECODE_STEP as usize) {
@@ -297,6 +433,10 @@ pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
                 }
             }
         }
+    }
+
+    if let Ok(payload) = decode_from_tile(raw, w, h) {
+        return Ok(payload);
     }
 
     Err("Not a Stegstr image (magic not found)".to_string())
@@ -324,6 +464,92 @@ mod tests {
         let payload = b"Hello, Stegstr!";
         let encoded = encode(&cover_path, payload).unwrap();
         let out_path = std::env::temp_dir().join("stego_test_out.png");
+        std::fs::write(&out_path, &encoded).unwrap();
+
+        let decoded = decode(&out_path).unwrap();
+        assert_eq!(decoded, payload);
+
+        let _ = std::fs::remove_file(cover_path);
+        let _ = std::fs::remove_file(out_path);
+    }
+
+    /// Regression test for BUGS.md #1: a multi-tile image (> 256x256, so
+    /// `encode()` embeds via its per-256x256-tile loop) with a payload long
+    /// enough to span more than one tile-local coefficient row (> ~9 payload
+    /// bytes) used to decode as silently corrupted garbage, because `decode()`
+    /// tried a whole-image transform (wrong bit ordering for a tiled image)
+    /// before the tile-aligned search that actually matches the encoder.
+    #[test]
+    fn test_encode_decode_roundtrip_multi_tile_long_payload() {
+        let (w, h) = (512u32, 512u32);
+        let mut img = image::RgbaImage::new(w, h);
+        for (i, p) in img.pixels_mut().enumerate() {
+            let v = (i % 256) as u8;
+            *p = image::Rgba([v, v.wrapping_add(7), v.wrapping_add(13), 255]);
+        }
+        let mut png_bytes = Vec::new();
+        let encoder = PngEncoder::new(&mut png_bytes);
+        encoder
+            .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+            .unwrap();
+        let cover_path = std::env::temp_dir().join("stego_test_multitile_cover.png");
+        std::fs::write(&cover_path, &png_bytes).unwrap();
+
+        // 100 bytes: well past the ~9-byte single-row threshold that triggered
+        // the whole-image/tile-local ordering mismatch.
+        let payload = vec![b'A'; 100];
+        let encoded = encode(&cover_path, &payload).unwrap();
+        let out_path = std::env::temp_dir().join("stego_test_multitile_out.png");
+        std::fs::write(&out_path, &encoded).unwrap();
+
+        let decoded = decode(&out_path).unwrap();
+        assert_eq!(decoded, payload);
+
+        let _ = std::fs::remove_file(cover_path);
+        let _ = std::fs::remove_file(out_path);
+    }
+
+    /// Regression test for BUGS.md #3: high-contrast / random-noise cover
+    /// images -- ordinary, common inputs -- used to decode with scattered
+    /// single-byte corruption. Root cause: `embed_in_tile` picked an LH value
+    /// with the right LSB parity but no regard for whether the pixels it would
+    /// reconstruct to stay in [0,255]; a pixel already at (or within 1 of) 0 or
+    /// 255 pushed the reconstruction out of range, `haar2d_inverse` silently
+    /// clamped it, and decode's forward transform then read back the wrong LSB.
+    /// A uniform-random-noise cover deliberately maximizes how many blocks sit
+    /// at that boundary.
+    #[test]
+    fn test_encode_decode_roundtrip_high_contrast_cover() {
+        let (w, h) = (256u32, 256u32);
+        let mut img = image::RgbaImage::new(w, h);
+        // Deterministic xorshift so this test has no external RNG dependency.
+        let mut state: u32 = 0x2545F491;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for p in img.pixels_mut() {
+            let r = next();
+            *p = image::Rgba([
+                (r & 0xFF) as u8,
+                ((r >> 8) & 0xFF) as u8,
+                ((r >> 16) & 0xFF) as u8,
+                255,
+            ]);
+        }
+        let mut png_bytes = Vec::new();
+        let encoder = PngEncoder::new(&mut png_bytes);
+        encoder
+            .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+            .unwrap();
+        let cover_path = std::env::temp_dir().join("stego_test_contrast_cover.png");
+        std::fs::write(&cover_path, &png_bytes).unwrap();
+
+        let payload = ("The quick brown fox jumps over the lazy dog. ".repeat(5)).into_bytes();
+        let encoded = encode(&cover_path, &payload).unwrap();
+        let out_path = std::env::temp_dir().join("stego_test_contrast_out.png");
         std::fs::write(&out_path, &encoded).unwrap();
 
         let decoded = decode(&out_path).unwrap();

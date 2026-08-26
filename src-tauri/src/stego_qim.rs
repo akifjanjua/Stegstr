@@ -586,6 +586,33 @@ mod ffi {
             .map_err(|_| "libjpeg error while reading coefficients".to_string())?
     }
 
+    /// RAII guard so `jpeg_destroy_decompress` + `fclose` always run -- including
+    /// when `error_exit` (see above) unwinds out of a libjpeg call via panic.
+    /// Before this guard existed, a panic partway through `jpeg_read_header` /
+    /// jpeg_read_coefficients` (routinely triggered by a truncated or corrupt
+    /// JPEG whose first two bytes still happen to be a valid SOI marker -- e.g.
+    /// any real photo cut short mid-transfer) skipped both cleanup calls, since
+    /// they were only ever reached on the non-panicking path. Each such call
+    /// leaked one open `FILE*` and libjpeg's internal per-decompress memory
+    /// pool; `decode_any` (lib.rs) tries the QIM/JPEG decoder against *every*
+    /// image passed in regardless of extension, so this fired on every
+    /// malformed-JPEG decode attempt, not just a rare corner case.
+    struct DecompressGuard {
+        cinfo: jpeg_decompress_struct,
+        fp: *mut std::ffi::c_void,
+    }
+
+    impl Drop for DecompressGuard {
+        fn drop(&mut self) {
+            unsafe {
+                jpeg_destroy_decompress(&mut self.cinfo);
+                if !self.fp.is_null() {
+                    libc_fclose(self.fp);
+                }
+            }
+        }
+    }
+
     fn read_y_coefficients_inner(path: &Path) -> Result<YCoefficients, String> {
         unsafe {
             let mut err: jpeg_error_mgr = std::mem::zeroed();
@@ -603,27 +630,27 @@ mod ffi {
                 jpeg_destroy_decompress(&mut cinfo);
                 return Err(format!("cannot open {}", path.display()));
             }
-            jpeg_stdio_src(&mut cinfo, fp as *mut _);
-            jpeg_read_header(&mut cinfo, true as boolean);
-            let coef_arrays = jpeg_read_coefficients(&mut cinfo);
+            let mut guard = DecompressGuard { cinfo, fp };
+
+            jpeg_stdio_src(&mut guard.cinfo, guard.fp as *mut _);
+            jpeg_read_header(&mut guard.cinfo, true as boolean);
+            let coef_arrays = jpeg_read_coefficients(&mut guard.cinfo);
             if coef_arrays.is_null() {
-                jpeg_destroy_decompress(&mut cinfo);
-                libc_fclose(fp);
                 return Err("jpeg_read_coefficients returned null".to_string());
             }
 
-            let comp = &*cinfo.comp_info; // component 0 = Y for standard JFIF ordering
+            let comp = &*guard.cinfo.comp_info; // component 0 = Y for standard JFIF ordering
             let blocks_wide = comp.width_in_blocks as usize;
             let blocks_high = comp.height_in_blocks as usize;
             let mut data = vec![[0i16; 64]; blocks_wide * blocks_high];
 
-            let access = (*cinfo.common.mem).access_virt_barray.expect("access_virt_barray missing");
+            let access = (*guard.cinfo.common.mem).access_virt_barray.expect("access_virt_barray missing");
             let y_array = *coef_arrays; // coefficient array for component 0
             let v_samp = comp.v_samp_factor.max(1) as u32;
             let mut blk_y: u32 = 0;
             while blk_y < blocks_high as u32 {
                 let rows = v_samp.min(blocks_high as u32 - blk_y);
-                let buffer = access(&mut cinfo.common, y_array, blk_y, rows, false as boolean);
+                let buffer = access(&mut guard.cinfo.common, y_array, blk_y, rows, false as boolean);
                 for offset_y in 0..rows as usize {
                     let row_ptr = *buffer.add(offset_y);
                     for bx in 0..blocks_wide {
@@ -634,8 +661,8 @@ mod ffi {
                 blk_y += rows;
             }
 
-            jpeg_destroy_decompress(&mut cinfo);
-            libc_fclose(fp);
+            // `guard` drops here (and on any panic unwind above), running
+            // jpeg_destroy_decompress + fclose exactly once either way.
             Ok(YCoefficients { blocks_wide, blocks_high, data })
         }
     }
@@ -654,6 +681,23 @@ mod ffi {
             write_y_coefficients_inner(&src_path, blocks_wide, blocks_high, &data, &dst_path)
         })
         .map_err(|_| "libjpeg error while writing coefficients".to_string())?
+    }
+
+    /// Same rationale as `DecompressGuard` above, for the compress side.
+    struct CompressGuard {
+        cinfo: jpeg_compress_struct,
+        fp: *mut std::ffi::c_void,
+    }
+
+    impl Drop for CompressGuard {
+        fn drop(&mut self) {
+            unsafe {
+                jpeg_destroy_compress(&mut self.cinfo);
+                if !self.fp.is_null() {
+                    libc_fclose(self.fp);
+                }
+            }
+        }
     }
 
     fn write_y_coefficients_inner(
@@ -682,24 +726,29 @@ mod ffi {
             let rb = CString::new("rb").unwrap();
             let in_fp = libc_fopen(src_c.as_ptr(), rb.as_ptr());
             if in_fp.is_null() {
+                jpeg_destroy_decompress(&mut srcinfo);
+                jpeg_destroy_compress(&mut dstinfo);
                 return Err(format!("cannot reopen {}", src_path.display()));
             }
-            jpeg_stdio_src(&mut srcinfo, in_fp as *mut _);
-            jpeg_read_header(&mut srcinfo, true as boolean);
-            let coef_arrays = jpeg_read_coefficients(&mut srcinfo);
+            let mut src_guard = DecompressGuard { cinfo: srcinfo, fp: in_fp };
+
+            jpeg_stdio_src(&mut src_guard.cinfo, src_guard.fp as *mut _);
+            jpeg_read_header(&mut src_guard.cinfo, true as boolean);
+            let coef_arrays = jpeg_read_coefficients(&mut src_guard.cinfo);
             if coef_arrays.is_null() {
+                jpeg_destroy_compress(&mut dstinfo);
                 return Err("jpeg_read_coefficients returned null".to_string());
             }
 
             // Mutate component 0 (Y) in place with our modified coefficients.
-            let comp = &*srcinfo.comp_info;
-            let access = (*srcinfo.common.mem).access_virt_barray.expect("access_virt_barray missing");
+            let comp = &*src_guard.cinfo.comp_info;
+            let access = (*src_guard.cinfo.common.mem).access_virt_barray.expect("access_virt_barray missing");
             let y_array = *coef_arrays;
             let v_samp = comp.v_samp_factor.max(1) as u32;
             let mut blk_y: u32 = 0;
             while blk_y < blocks_high as u32 {
                 let rows = v_samp.min(blocks_high as u32 - blk_y);
-                let buffer = access(&mut srcinfo.common, y_array, blk_y, rows, true as boolean);
+                let buffer = access(&mut src_guard.cinfo.common, y_array, blk_y, rows, true as boolean);
                 for offset_y in 0..rows as usize {
                     let row_ptr = *buffer.add(offset_y);
                     for bx in 0..blocks_wide {
@@ -714,19 +763,19 @@ mod ffi {
             let wb = CString::new("wb").unwrap();
             let out_fp = libc_fopen(dst_c.as_ptr(), wb.as_ptr());
             if out_fp.is_null() {
+                jpeg_destroy_compress(&mut dstinfo);
                 return Err(format!("cannot open {} for writing", dst_path.display()));
             }
-            jpeg_stdio_dest(&mut dstinfo, out_fp as *mut _);
-            jpeg_copy_critical_parameters(&mut srcinfo, &mut dstinfo);
-            jpeg_write_coefficients(&mut dstinfo, coef_arrays);
-            jpeg_finish_compress(&mut dstinfo);
-            jpeg_destroy_compress(&mut dstinfo);
-            libc_fclose(out_fp);
+            let mut dst_guard = CompressGuard { cinfo: dstinfo, fp: out_fp };
 
-            jpeg_finish_decompress(&mut srcinfo);
-            jpeg_destroy_decompress(&mut srcinfo);
-            libc_fclose(in_fp);
+            jpeg_stdio_dest(&mut dst_guard.cinfo, dst_guard.fp as *mut _);
+            jpeg_copy_critical_parameters(&mut src_guard.cinfo, &mut dst_guard.cinfo);
+            jpeg_write_coefficients(&mut dst_guard.cinfo, coef_arrays);
+            jpeg_finish_compress(&mut dst_guard.cinfo);
+            jpeg_finish_decompress(&mut src_guard.cinfo);
 
+            // Both guards drop here (and on any panic unwind above), each
+            // running its destroy + fclose exactly once either way.
             Ok(())
         }
     }
