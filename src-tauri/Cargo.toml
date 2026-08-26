@@ -39,3 +39,6 @@ hex = "0.4"
 mozjpeg-sys = "2"
 reed-solomon = "0.2"
 
+[dev-dependencies]
+proptest = "1"
+

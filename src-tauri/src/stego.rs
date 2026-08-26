@@ -411,7 +411,16 @@ pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
     }
     let raw = img_rgba.as_raw();
 
-    if w >= TILE_SIZE && h >= TILE_SIZE {
+    // `||`, not `&&`: encode() tiles each axis independently (its loop steps
+    // by TILE_SIZE on x and y separately), so a "wide but short" or "narrow
+    // but tall" image -- only ONE dimension >= TILE_SIZE -- still gets tiled
+    // along that one axis (e.g. a 258x8 image becomes a 256x8 tile at x=0 plus
+    // a near-empty 2x8 remainder). Requiring BOTH dimensions >= TILE_SIZE here
+    // skipped the tile-aligned search entirely for that shape and fell through
+    // to the whole-image interpretation, which is wrong whenever the image was
+    // actually tiled (bug: found by the prop_roundtrip_random_cover_and_payload
+    // proptest, minimal case w=258 h=8).
+    if w >= TILE_SIZE || h >= TILE_SIZE {
         for oy in (0..=h.saturating_sub(TILE_SIZE)).step_by(DECODE_STEP as usize) {
             for ox in (0..=w.saturating_sub(TILE_SIZE)).step_by(DECODE_STEP as usize) {
                 let tw = TILE_SIZE.min(w - ox);
@@ -443,6 +452,7 @@ pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_encode_decode_roundtrip() {
@@ -557,4 +567,58 @@ mod tests {
         let _ = std::fs::remove_file(out_path);
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(40))]
+
+        /// Property: for any random-noise cover (single-tile and multi-tile
+        /// sizes) and any payload that fits, encode-then-decode always returns
+        /// the exact original bytes. This is the property bugs #1-#3 in
+        /// BUGS.md all violated for ordinary inputs; each fix here is a
+        /// counterexample this test would have failed on before it landed.
+        #[test]
+        fn prop_roundtrip_random_cover_and_payload(
+            w in 8u32..320,
+            h in 8u32..320,
+            seed in any::<u64>(),
+            payload in proptest::collection::vec(any::<u8>(), 0..600),
+        ) {
+            let w = w - (w % 2); // encode() requires even dimensions
+            let h = h - (h % 2);
+            if w < 2 || h < 2 {
+                return Ok(());
+            }
+            let mut state = seed | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state
+            };
+            let mut img = image::RgbaImage::new(w, h);
+            for p in img.pixels_mut() {
+                let r = next();
+                *p = image::Rgba([(r & 0xFF) as u8, ((r >> 8) & 0xFF) as u8, ((r >> 16) & 0xFF) as u8, 255]);
+            }
+            let mut png_bytes = Vec::new();
+            PngEncoder::new(&mut png_bytes)
+                .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+                .unwrap();
+            let unique = format!("{:x}_{:x}_{:x}_{}", w, h, seed, payload.len());
+            let cover_path = std::env::temp_dir().join(format!("stego_prop_cover_{unique}.png"));
+            std::fs::write(&cover_path, &png_bytes).unwrap();
+
+            let result = encode(&cover_path, &payload);
+            if let Ok(encoded) = result {
+                let out_path = std::env::temp_dir().join(format!("stego_prop_out_{unique}.png"));
+                std::fs::write(&out_path, &encoded).unwrap();
+                let decoded = decode(&out_path).unwrap();
+                prop_assert_eq!(decoded, payload);
+                let _ = std::fs::remove_file(out_path);
+            }
+            // Err(_) is fine -- it just means this random cover/payload
+            // combination didn't fit; capacity errors are covered elsewhere.
+
+            let _ = std::fs::remove_file(cover_path);
+        }
+    }
 }
