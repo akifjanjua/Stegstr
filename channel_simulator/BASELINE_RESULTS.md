@@ -214,7 +214,22 @@ worst case here is not representative of typical real-world cover photos.
 
 ---
 
-## Re-verified post Phase-1-bugfix campaign, against the actual Rust CLI (not the Python prototype)
+## Re-verified post Phase-1-bugfix campaign, against the actual Rust CLI (SIMULATED channels, not the Python prototype)
+
+**This section is simulated-channel testing, like everything else in this
+file above it except the "two real platforms" paragraph just above (which
+is explicitly marked as such) -- no image in this section was actually
+uploaded to or downloaded from WhatsApp, Instagram, Facebook, Twitter, or
+Telegram.** `channel.py`'s `simulate()` approximates what each platform's
+own re-encoding does (resize to the platform's known max width, re-encode as
+JPEG at the platform's known quality/chroma-subsampling settings) entirely
+locally, no network involved. It is a well-validated proxy (see the "two
+real platforms" paragraph above, where the same simulated WhatsApp/Instagram
+profiles were cross-checked against genuine uploads and matched), but it is
+still a proxy, not a live-platform test, and this section's numbers should
+never be read as "sent through real WhatsApp/Instagram/etc." Telegram in
+particular has never been tested live at all (see `STEGSTR_ENTRY_V3.md`
+Part 2's "Close the Telegram gap" -- still open).
 
 The results above (this file, up to this point) were measured using
 `dct_variants.encode_dct_qim`/`decode_dct_qim` -- the Python prototype the
@@ -224,18 +239,19 @@ path: bugs #1, #2, #4, #5) and `stego_qim.rs`'s libjpeg FFI cleanup layer
 (bug #3 -- a resource-leak fix with no change to the QIM encode/decode math
 itself). None of those fixes changed the QIM algorithm's actual coefficient
 read/write logic, but "should be unaffected" is not the same as "verified,"
-so re-ran the platform survival matrix against the **actual, current
-`stegstr-cli --robust` binary** end-to-end (not the Python prototype) --
-see `run_matrix_rust_cli.py`.
+so re-ran the simulated-channel survival matrix against the **actual,
+current `stegstr-cli --robust` binary** end-to-end (not the Python
+prototype) -- see `run_matrix_rust_cli.py`.
 
 Covers: the original 4 (`textured`, `highfreq`, `smooth`, `portrait`) plus 5
 more from `covers_extended/` (`high_contrast`, `low_light`, `screenshot`,
-`phone_portrait`, `narrow_tall`) -- 9 covers x 5 platforms (WhatsApp,
-Instagram, Facebook, Twitter, Telegram) = 45 combinations.
+`phone_portrait`, `narrow_tall`) -- 9 covers x 5 simulated channel profiles
+(whatsapp, instagram, facebook, twitter, telegram) = 45 combinations.
 
-**Result: 45/45 passed.** WhatsApp/Instagram/Facebook/Twitter/Telegram
-survival holds after the Phase 1 bugfix campaign, confirmed against the real
-shipped binary, not assumed from the fixes' scope.
+**Result: 45/45 passed.** Simulated WhatsApp/Instagram/Facebook/Twitter/
+Telegram-profile survival holds after the Phase 1 bugfix campaign, confirmed
+against the real shipped binary (not assumed from the fixes' scope) -- but
+still simulated, not a live-platform re-test.
 
 ```
 cover                  whatsapp   instagram  facebook   twitter    telegram

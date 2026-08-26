@@ -76,10 +76,11 @@ to do the same thing, and has anyone actually checked it? Findings:
   doesn't know which encoder produced an image they were sent).
 - **Result: 45/45** -- 9 realistic cover-image types (including a real
   phone-camera aspect ratio, a screenshot/UI-style image, low-light, high-
-  contrast, and an adversarial narrow-tall case) x all 5 platforms tested
-  (WhatsApp, Instagram, Telegram, Facebook, Twitter), run through the actual
-  compiled Rust binary. Full methodology and numbers:
-  `channel_simulator/BASELINE_RESULTS.md`.
+  contrast, and an adversarial narrow-tall case) x all 5 **simulated**
+  platform channel profiles (WhatsApp, Instagram, Telegram, Facebook,
+  Twitter -- resize + JPEG re-encode at each platform's known settings, run
+  locally, no network involved), run through the actual compiled Rust
+  binary. Full methodology and numbers: `channel_simulator/BASELINE_RESULTS.md`.
 - **Confirmed on real platforms, not just simulation:** an embedded photo was
   sent through real WhatsApp and Instagram, downloaded from the receiving
   side, and decoded byte-for-byte correctly on both. Instagram genuinely
