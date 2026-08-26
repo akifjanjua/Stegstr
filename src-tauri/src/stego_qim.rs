@@ -176,6 +176,13 @@ const QIM_EMBED_QUALITY: u8 = 80;
 /// fixed, not adaptive -- since decode must be able to read the tier byte
 /// before it can know which delta the rest of the payload used.
 const QIM_HEADER_BITS: usize = 24;
+/// Pre-Phase-4 header layout: just the u16 codeword-length prefix, no tier
+/// byte (that version always used a single QIM_DELTA=16 for everything).
+/// `decode()` tries the current 24-bit format first, then falls back to this
+/// one, so images embedded by this crate's own earlier builds still decode
+/// instead of failing (or, before that fallback existed, panicking -- see
+/// BUGS.md's header-compatibility entry for how this was actually found).
+const QIM_LEGACY_HEADER_BITS: usize = 16;
 const QIM_HEADER_DELTA: f64 = QIM_DELTA_DEFAULT;
 const QIM_HEADER_REPEAT: usize = 9; // extra margin: losing the header loses the whole payload
 const QIM_PERM_SEED: u64 = 20231115;
@@ -356,10 +363,33 @@ mod rs {
     }
 
     /// `erasure_positions` are byte offsets into the (post-encode) codeword.
+    ///
+    /// BUG (fixed): `reed_solomon::Decoder::correct` does not itself validate
+    /// that its input buffer is at least `nsym` bytes long -- for a chunk
+    /// shorter than `nsym` (reachable from a corrupted or mismatched header
+    /// producing a bogus `codeword_len`, not just adversarial input) it
+    /// panics via an internal usize underflow
+    /// (`reed-solomon-0.2.1/src/buffer.rs`: computing `chunk.len() - nsym`
+    /// wraps around to near `usize::MAX`, then a slice bound built from that
+    /// panics). Confirmed via cross-version compatibility testing: decoding
+    /// a QIM image embedded by this crate's own pre-Phase-4 build (16-bit
+    /// header) with the current (24-bit header) decoder produced exactly
+    /// this crash, not a clean decode failure. `decode_any` (lib.rs) runs
+    /// this path against every image passed to it regardless of source, so
+    /// any sufficiently malformed input reaching here -- not just an old
+    /// file format -- could crash the whole process. Guarded here instead
+    /// of trusting the header's declared length is internally consistent.
     pub fn decode(codeword: &[u8], nsym: usize, erasure_positions: &[usize]) -> Result<Vec<u8>, String> {
         let dec = Decoder::new(nsym);
         let mut out = Vec::with_capacity(codeword.len());
         for (chunk_idx, chunk) in codeword.chunks(BLOCK).enumerate() {
+            if chunk.len() <= nsym {
+                return Err(format!(
+                    "RS chunk too short to decode: {} bytes, need > {} (nsym)",
+                    chunk.len(),
+                    nsym
+                ));
+            }
             let base = chunk_idx * BLOCK;
             let local_erasures: Vec<u8> = erasure_positions
                 .iter()
@@ -573,18 +603,23 @@ pub fn encode(cover_path: &Path, payload: &[u8], robustness: Robustness) -> Resu
     result
 }
 
-/// Extract a payload previously embedded with [`encode`]. Returns `Ok(None)` (not
-/// an error) when the image has no valid QIM payload, so callers can fall back to
-/// trying the DWT decoder -- a plain, non-Stegstr JPEG is an expected input, not a
-/// failure.
-pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    let jpeg = match ffi::read_y_coefficients(path) {
-        Ok(j) => j,
-        Err(_) => return Ok(None), // not a readable JPEG at all
-    };
-    let stream = coeff_stream(jpeg.blocks_wide, jpeg.blocks_high);
-    let perm = fixed_permutation(stream.len());
-
+/// Try decoding assuming a specific header layout. `header_bits` is 24 (this
+/// crate's current format: tier byte + u16 length) or `QIM_LEGACY_HEADER_BITS`
+/// (16, pre-Phase-4: u16 length only, always `QIM_TIER_DEFAULT`/delta 16).
+/// Returns `None` on any failure -- wrong header size read against a given
+/// image's actual embedded format produces garbage `codeword_len`/coefficient
+/// values, which fail cleanly here (RS correction failure, or a magic
+/// mismatch in `unwrap_payload`) rather than a false positive: Reed-Solomon
+/// plus an explicit 7-byte magic comparison is a strong enough integrity
+/// check that a coincidental match on the wrong interpretation is not a
+/// realistic concern (same reasoning `decode_any` already relies on when it
+/// tries this QIM decoder against a plain PNG before falling back to DWT).
+fn try_decode_with_header_format(
+    jpeg: &ffi::YCoefficients,
+    stream: &[(usize, usize, usize)],
+    perm: &[u32],
+    header_bits: usize,
+) -> Option<Vec<u8>> {
     let read_bit = |slot: u32, delta: f64| -> (u8, f64) {
         let (by, bx, zi) = stream[slot as usize];
         let (dy, dx) = zigzag_rc(zi);
@@ -596,9 +631,9 @@ pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
     // able to read the tier byte (which says what delta the BODY used)
     // before it can know any other delta, so the header itself can't be
     // adaptive without a chicken-and-egg problem.
-    let n_header_slots = QIM_HEADER_BITS * QIM_HEADER_REPEAT;
+    let n_header_slots = header_bits * QIM_HEADER_REPEAT;
     if n_header_slots > perm.len() {
-        return Ok(None);
+        return None;
     }
     let mut header_bits_raw = Vec::with_capacity(n_header_slots);
     let mut header_margins_raw = Vec::with_capacity(n_header_slots);
@@ -607,21 +642,28 @@ pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
         header_bits_raw.push(bit);
         header_margins_raw.push(margin);
     }
-    let (header_bits, _) = deinterleave_majority(&header_bits_raw, &header_margins_raw, QIM_HEADER_REPEAT);
-    if header_bits.len() < QIM_HEADER_BITS {
-        return Ok(None);
+    let (header_bits_decoded, _) = deinterleave_majority(&header_bits_raw, &header_margins_raw, QIM_HEADER_REPEAT);
+    if header_bits_decoded.len() < header_bits {
+        return None;
     }
-    let header_bytes = from_bits(&header_bits[..QIM_HEADER_BITS]);
-    if header_bytes.len() < 3 {
-        return Ok(None);
-    }
-    let tier = header_bytes[0];
+    let header_bytes = from_bits(&header_bits_decoded[..header_bits]);
+
+    let (tier, codeword_len) = if header_bits == QIM_LEGACY_HEADER_BITS {
+        if header_bytes.len() < 2 {
+            return None;
+        }
+        (QIM_TIER_DEFAULT, u16::from_be_bytes([header_bytes[0], header_bytes[1]]) as usize)
+    } else {
+        if header_bytes.len() < 3 {
+            return None;
+        }
+        (header_bytes[0], u16::from_be_bytes([header_bytes[1], header_bytes[2]]) as usize)
+    };
     let body_delta = delta_for_tier(tier);
-    let codeword_len = u16::from_be_bytes([header_bytes[1], header_bytes[2]]) as usize;
     let n_codeword_bits = codeword_len * 8;
     let needed = n_header_slots + n_codeword_bits * QIM_REPEAT;
     if codeword_len == 0 || needed > perm.len() {
-        return Ok(None);
+        return None;
     }
 
     let mut codeword_bits_raw = Vec::with_capacity(n_codeword_bits * QIM_REPEAT);
@@ -648,7 +690,33 @@ pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
         }
     }
 
-    Ok(unwrap_payload(&codeword, &erasures))
+    unwrap_payload(&codeword, &erasures)
+}
+
+/// Extract a payload previously embedded with [`encode`]. Returns `Ok(None)` (not
+/// an error) when the image has no valid QIM payload, so callers can fall back to
+/// trying the DWT decoder -- a plain, non-Stegstr JPEG is an expected input, not a
+/// failure.
+///
+/// Tries the current header format first, then the pre-Phase-4 legacy format
+/// (see `QIM_LEGACY_HEADER_BITS`) -- images embedded by this crate's own
+/// earlier builds still decode instead of failing (or, before this fallback
+/// existed, panicking: see BUGS.md's header-compatibility entry).
+pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let jpeg = match ffi::read_y_coefficients(path) {
+        Ok(j) => j,
+        Err(_) => return Ok(None), // not a readable JPEG at all
+    };
+    let stream = coeff_stream(jpeg.blocks_wide, jpeg.blocks_high);
+    let perm = fixed_permutation(stream.len());
+
+    if let Some(payload) = try_decode_with_header_format(&jpeg, &stream, &perm, QIM_HEADER_BITS) {
+        return Ok(Some(payload));
+    }
+    if let Some(payload) = try_decode_with_header_format(&jpeg, &stream, &perm, QIM_LEGACY_HEADER_BITS) {
+        return Ok(Some(payload));
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -999,5 +1067,80 @@ mod tests {
         );
         let _ = std::fs::remove_file(&flat_path);
         let _ = std::fs::remove_file(&flat_jpeg_path);
+    }
+
+    /// Reproduces the pre-Phase-4 encoder's 16-bit header (`QIM_LEGACY_HEADER_BITS`:
+    /// u16 codeword length only, no tier byte, body always at
+    /// `QIM_DELTA_DEFAULT`). `encode()` can no longer produce this format
+    /// itself now that it always writes the tier byte, so this stands in for
+    /// the old binary to exercise the decoder's legacy fallback path.
+    fn encode_legacy_16bit_header(cover_path: &Path, payload: &[u8]) -> Vec<u8> {
+        let img = image::open(cover_path).unwrap().to_rgb8();
+        let tmp_in = std::env::temp_dir().join(format!("stegstr_qim_legacy_in_{}.jpg", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&tmp_in).unwrap();
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, QIM_EMBED_QUALITY);
+            enc.encode(&img, img.width(), img.height(), image::ExtendedColorType::Rgb8).unwrap();
+        }
+
+        let mut jpeg = ffi::read_y_coefficients(&tmp_in).unwrap();
+        let stream = coeff_stream(jpeg.blocks_wide, jpeg.blocks_high);
+        let codeword = wrap_payload(payload);
+        let codeword_bits = to_bits(&codeword);
+        let header_bytes = (codeword.len() as u16).to_be_bytes().to_vec();
+        let header_bits = to_bits(&header_bytes);
+
+        let perm = fixed_permutation(stream.len());
+        let interleaved_header = interleave_repeat(&header_bits, QIM_HEADER_REPEAT);
+        let interleaved_codeword = interleave_repeat(&codeword_bits, QIM_REPEAT);
+
+        let write_bit = |jpeg: &mut ffi::YCoefficients, slot: u32, bit: u8, delta: f64| {
+            let (by, bx, zi) = stream[slot as usize];
+            let (dy, dx) = zigzag_rc(zi);
+            let c = jpeg.get(by, bx, dy, dx) as f64;
+            let v = qim_embed(c, bit, delta).clamp(-32767, 32767) as i16;
+            jpeg.set(by, bx, dy, dx, v);
+        };
+        for (i, &bit) in interleaved_header.iter().enumerate() {
+            write_bit(&mut jpeg, perm[i], bit, QIM_HEADER_DELTA);
+        }
+        for (i, &bit) in interleaved_codeword.iter().enumerate() {
+            write_bit(&mut jpeg, perm[interleaved_header.len() + i], bit, QIM_DELTA_DEFAULT);
+        }
+
+        let tmp_out = std::env::temp_dir().join(format!("stegstr_qim_legacy_out_{}.jpg", std::process::id()));
+        ffi::write_y_coefficients(&tmp_in, &jpeg, &tmp_out).unwrap();
+        let bytes = std::fs::read(&tmp_out).unwrap();
+        let _ = std::fs::remove_file(&tmp_in);
+        let _ = std::fs::remove_file(&tmp_out);
+        bytes
+    }
+
+    /// Regression test for the header-versioning fix: images embedded with
+    /// the old 16-bit header must still decode with the current decoder.
+    /// Before this fix `decode()` only tried the current 24-bit header --
+    /// against a legacy image this silently returned `None` in the best
+    /// case, and in the worst case (a short-enough misread codeword length)
+    /// crashed the process via a Reed-Solomon buffer underflow. See BUGS.md.
+    #[test]
+    fn test_legacy_16bit_header_still_decodes() {
+        let payload = b"header compat regression test";
+        let cover_path = std::env::temp_dir().join("stego_qim_test_legacy_cover.png");
+        let mut state: u32 = 0xDEADBEEF;
+        write_png(&cover_path, 256, 256, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            [(state & 0xFF) as u8, ((state >> 8) & 0xFF) as u8, ((state >> 16) & 0xFF) as u8]
+        });
+
+        let legacy_jpeg = encode_legacy_16bit_header(&cover_path, payload);
+        let legacy_out = std::env::temp_dir().join("stego_qim_test_legacy_out.jpg");
+        std::fs::write(&legacy_out, &legacy_jpeg).unwrap();
+
+        assert_eq!(decode(&legacy_out).unwrap().as_deref(), Some(payload.as_slice()));
+
+        let _ = std::fs::remove_file(&cover_path);
+        let _ = std::fs::remove_file(&legacy_out);
     }
 }

@@ -534,6 +534,26 @@ a genuinely signed event; rejects tampered content, a forged id, a garbage
 signature, and the impersonation case above; rejects malformed events
 without throwing. 6/6 passing.
 
+**Verified pre-existing upstream, not fork-introduced.** Same check run for
+bugs #1/#2/#5 (see "Verified against pristine upstream" above): cloned
+`brunkstr/Stegstr` at `ad2e10e` and grepped its whole `src/` tree for
+`verify`/`schnorr.verify` -- zero matches, same as our pre-fix tree. Diffed
+`src/relay.ts`'s `onmessage` handler byte-for-byte against upstream's copy:
+identical, no verification call anywhere. This is the holder's pre-existing
+vulnerability, not something this fork introduced -- not assumed, confirmed
+by direct comparison against the actual upstream source.
+
+**Verified the fix isn't overly strict.** A verifier that's too strict would
+silently break the real feed just as badly as one that's missing entirely --
+this failure mode isn't caught by synthetic/forged-event unit tests alone.
+Connected to two independent real public relays (`wss://relay.damus.io`,
+`wss://nos.lol`), pulled 50 real recently-published `kind:1` events from
+each, ran every one through the actual `verifyEvent()`: **100/100 accepted,
+0 false rejections** across both relays. See
+`src/__tests__/verify-against-real-relay.test.ts` (excluded from the regular
+`npm test` run since it's network-dependent and talks to a third party; run
+explicitly with `npx vitest run src/__tests__/verify-against-real-relay.test.ts`).
+
 ---
 
 ## 7. Publish silently treated "1 of 5 relays confirmed" the same as "5 of 5"
@@ -558,6 +578,86 @@ the existing error toast for total failure.
 address, confirming `publish()` itself already reported the count honestly
 (1, not 0 or 2) even before this fix; the fix is specifically about the UI
 not silently treating that 1 the same as a full 2.
+
+---
+
+## 8. Old QIM images (16-bit header) failed to decode against the current binary -- and worse, could crash the process
+
+**Severity:** Critical. Not just a compatibility gap: a mismatched header
+interpretation could underflow a buffer in the Reed-Solomon decoder and
+panic the whole process (exit code 101), not fail cleanly.
+
+**Why this was checked:** Phase 4's adaptive-delta work (see above) grew
+the QIM header from 16 bits (`u16` codeword length only) to 24 bits (a tier
+byte + `u16` length), needed so decode knows which delta the body used
+before it can read the body. That's a wire-format change; anything embedded
+with the pre-Phase-4 binary needed to be checked against the new decoder,
+not assumed to still work.
+
+**Repro:** built the pre-Phase-4 binary from commit `24d71d8` (last commit
+before the adaptive-delta commit `11d4269`) in a separate git worktree,
+confirmed via grep it still has the old `QIM_HEADER_BITS: usize = 16`.
+Embedded a payload with that binary, decoded the resulting JPEG with the
+current (post-`11d4269`) binary:
+
+```
+$ old-stegstr-cli.exe embed cover.png -o old_embed.jpg --payload "header compat test message"
+$ new-stegstr-cli.exe decode old_embed.jpg
+thread 'main' panicked at ...reed-solomon-0.2.1\src\buffer.rs:38:14:
+range end index 18446744073709551492 out of range for slice of length 4
+[exit code: 101]
+```
+
+**Root cause, two layered bugs:**
+1. `decode()` only ever tried the current 24-bit header interpretation.
+   Read against a 16-bit-header image, the extra assumed tier byte shifts
+   every subsequent bit read, so the recovered `codeword_len` is garbage --
+   in this repro, garbled down to a value that produced a Reed-Solomon
+   chunk shorter than `QIM_RS_NSYM` (128).
+2. `mod rs`'s `decode()` passed that too-short chunk straight into
+   `reed_solomon::Decoder::correct()` with no bounds check. The
+   `reed-solomon` crate (v0.2.1) does not itself guard against a buffer
+   shorter than `nsym`, and underflows a `usize` internally, producing the
+   panic above. This is a real crash reachable from ordinary use (open any
+   old-format image with the new binary), not a contrived fuzz input.
+
+**Fix:**
+- `mod rs::decode()`: added an explicit bounds check --
+  `if chunk.len() <= nsym { return Err(...) }` -- before calling
+  `dec.correct()`, so a too-short/malformed chunk fails cleanly with a
+  descriptive error instead of panicking. This is defense in depth against
+  any malformed input, not just the legacy-header case.
+- Added `QIM_LEGACY_HEADER_BITS = 16` and extracted the header/body decode
+  logic into `try_decode_with_header_format(..., header_bits)`, parameterized
+  over which header layout to assume. Public `decode()` now tries the
+  current 24-bit format first, and on failure falls back to the legacy
+  16-bit format (fixed `QIM_TIER_DEFAULT`/`QIM_DELTA_DEFAULT` body, no tier
+  byte). A wrong-format read fails cleanly (RS correction failure or a magic
+  mismatch in `unwrap_payload`) rather than false-positiving, for the same
+  reason `decode_any` already trying QIM against a plain PNG before falling
+  back to DWT is safe.
+
+**Verified, both directions, byte-exact:**
+- Old-format image (embedded with the `24d71d8` binary) now decodes
+  correctly with the current binary: output exactly matches the original
+  payload ("header compat test message"). Exit code 101 (panic) before the
+  fix; exit code 0 with the correct payload after.
+- New-format image (embedded with the current binary) still decodes
+  correctly (regression check): output exactly matches ("reverse compat
+  test message").
+- Full regression suite still green after the fix: `cargo test --release`
+  8/8, `cargo clippy --release --all-targets -- -D warnings` clean,
+  platform survival matrix 45/45, extra stress matrix 79/80 (same single
+  pre-existing residual gap as before -- `pure_solid_white` on WhatsApp,
+  unrelated to this fix, not a new regression).
+
+**Commit:** see the commit adding `QIM_LEGACY_HEADER_BITS` and the
+`rs::decode` bounds check in `stego_qim.rs`.
+
+**Regression test:** `stego_qim::tests::test_legacy_16bit_header_still_decodes`
+-- reproduces the legacy 16-bit-header encoder inline (the current `encode()`
+can no longer produce that format itself) and confirms the current `decode()`
+falls back to it correctly.
 
 ---
 
