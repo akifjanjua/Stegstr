@@ -176,7 +176,11 @@ just the Python prototype. It's also been confirmed against two real
 platforms directly (not simulated): an embedded photo was sent through real
 WhatsApp and Instagram, downloaded from the receiving side, and decoded
 byte-for-byte correctly on both -- see `../ROBUSTNESS_PORT_NOTES.md` for the
-full build/verify instructions.
+full build/verify instructions. (A later control experiment narrowed exactly
+what the WhatsApp half of this claim is entitled to say -- see "Live re-test
+after Phase 4" below: the file passed through unmodified rather than being
+recompressed and surviving it. Instagram's result there is a genuine
+recompression-survival result.)
 
 ### Two more checks: camera-realistic covers, and SSIM (not just PSNR)
 
@@ -379,3 +383,139 @@ All three require `cargo build --release --bin stegstr-cli` first, and
 `adaptive_delta_report.py`'s "before" column requires temporarily rebuilding
 with `QIM_DELTA_FLAT` set equal to `QIM_DELTA_DEFAULT` (16) in
 `src-tauri/src/stego_qim.rs` to disable adaptivity for comparison.
+
+---
+
+## Live re-test after Phase 4: three real sends, plus a WhatsApp control experiment
+
+The Phase 4 adaptive-delta change alters what gets embedded, so the earlier
+live-platform confirmation (`ROBUSTNESS_PORT_NOTES.md`, WhatsApp + Instagram)
+needed re-running against the current binary, not assumed to still hold.
+This round also asked a sharper question the earlier one didn't: when a
+platform returns a file byte-identical to what was sent, does that mean the
+embedding *survived recompression*, or that *no recompression happened at
+all*? Those are different claims, and only a control image (no embedding,
+sent the same way) can tell them apart.
+
+### Method
+
+Built the current release CLI (`cargo build --release --bin stegstr-cli`,
+this session's binary, includes the Phase 4 adaptive delta and the header-
+versioning fix from `BUGS.md` #8). Embedded a single fixed, randomly-noned
+payload (`STEGSTR-LIVE-TEST-2026-08-26-d154705a3226`, see `live_test/PAYLOAD.txt`)
+into three **real camera-realistic JPEG photos** -- not this repo's synthetic
+generated covers, but genuine photographic images (OS-bundled default
+wallpaper photography, not PIL-drawn) -- via
+`stegstr-cli embed <cover> -o <out> --robust --payload "<msg>"`
+(`Robustness::Max`: the default `--robust` implies). Sent each through the
+identical manual path a real user would use (WhatsApp Web, Instagram) and
+brought the received file back for byte-exact size comparison and decode.
+Telegram was prepared identically but not yet sent live -- see below, still
+simulated for that platform.
+
+### Result: WhatsApp and Instagram
+
+| file | sent | received | Δ | decode |
+|---|---:|---:|---:|---|
+| `send_whatsapp.jpg` | 14,486 B | 14,486 B | +0 B | **PASS** |
+| `send_instagram.jpg` | 48,241 B | 52,609 B | +4,368 B (+9.1%) | **PASS** |
+| `send_telegram.jpg` | 26,321 B | -- not sent live this round -- | -- | simulated only |
+
+Both received files decode to the exact original payload via the current
+binary. **These are two different kinds of result and should not be
+described the same way:**
+
+- **Instagram is a genuine survival result.** The file changed size, meaning
+  Instagram's own pipeline actually re-encoded it, and the payload survived
+  that real recompression. This is the claim "survives Instagram
+  recompression" is actually entitled to.
+- **WhatsApp came back byte-identical -- which is not, by itself, evidence
+  of survival.** A byte-identical round trip is equally consistent with two
+  very different mechanisms: (a) WhatsApp recompressed the file and,
+  coincidentally or otherwise, produced the exact same bytes, or (b)
+  WhatsApp's pipeline didn't touch the file at all because it was already
+  compliant with whatever threshold triggers its own recompression. Without
+  a control, "decoded correctly after being byte-identical" cannot
+  distinguish these, and only one of them is actually a robustness result.
+
+### The control test
+
+Sent an **untouched, unembedded, original cover photo** -- the same photo
+`send_whatsapp.jpg` was made from, 1920x1200, 393,630 bytes, verified
+byte-for-byte identical to the OS source file by SHA-256 before sending
+(`live_test/control/control_whatsapp_original.jpg`) -- through the identical
+WhatsApp Web path.
+
+**Result: the control came back at ~94KB, a ~76% size reduction.** WhatsApp's
+pipeline does recompress images that need it. Since the *same path*
+recompressed a 393,630-byte original by ~76% but left our 14,486-byte stego
+file completely untouched, mechanism (a) above is ruled out and (b) is
+confirmed: **the stego file wasn't put through recompression and made to
+survive it -- it was already small/compliant enough that WhatsApp's own
+pipeline treated it as a no-op.**
+
+**Precise statement of what's proven:** `--robust`'s pre-conditioning
+(resize to 576px on the longer side, JPEG re-encode at quality 80 -- see
+below) puts its output below whatever size/dimension threshold triggers
+WhatsApp's own recompression, so the file passes through the path
+unmodified. This is **not** the same claim as "survives WhatsApp
+recompression" -- that would require WhatsApp to have actually re-encoded
+the file and the payload to still decode afterward, which is precisely what
+did *not* happen here (WhatsApp never touched it) and precisely what *did*
+happen with Instagram above. Do not conflate the two in any summary of this
+result: WhatsApp is a pass-through result, Instagram is a survival result.
+
+This doesn't mean WhatsApp support is weaker -- a file WhatsApp never
+recompresses is at zero risk from WhatsApp's recompression, which is a
+perfectly good practical outcome for a user sending a photo. It means the
+correct claim is narrower and more precise than "survives WhatsApp
+recompression," and the simulated WhatsApp channel profile in this file's
+matrices above (quality 65, resize) — which genuinely does recompress every
+image it's given, precisely because a local simulator has no threshold logic
+to skip below — remains the only evidence for surviving an *actual*
+WhatsApp-style recompression pass, not a live confirmation that WhatsApp
+itself ever performs one on Stegstr's typical output size.
+
+### The 576px pre-resize: a stated tradeoff, with real capacity numbers
+
+`--robust` (`Robustness::Max`) always shrinks the cover to **576px on the
+longer side** before embedding, then re-encodes at **JPEG quality 80**
+(`stego_qim.rs`, `QIM_EMBED_QUALITY`) -- this is what makes recompression a
+guaranteed no-op for every target platform's own resize step (see "What
+changed vs. the initial QIM prototype" above), and, per this section, is
+also apparently what keeps WhatsApp specifically from touching the file at
+all. The tradeoff is real: a photo sent through Stegstr is delivered at a
+fraction of its original resolution regardless of how large the source was
+-- the 1920x1200 control photo above would come out at 576x360, a ~90%
+pixel-count reduction, even before any platform touches it.
+
+That resolution ceiling also caps how much payload fits. Measured directly
+against the compiled binary (binary search on `--payload` length until
+`embed` starts failing with "Payload too large"), not estimated from the
+formula:
+
+| cover (post-resize) | measured capacity |
+|---|---:|
+| 576x360 (16:10 landscape photo, e.g. the control cover here) | 903 bytes |
+| 576x576 (square) | 1,513 bytes |
+
+Capacity scales with resized pixel count, not with `--robust`'s 576px figure
+alone -- a narrower-aspect cover has fewer total coefficients after the same
+longer-side cap. Both numbers comfortably exceed a typical Nostr note (the
+542-byte realistic payload used earlier in this file) but are worth knowing
+explicitly before assuming a large bundle (e.g. the 1187-byte 5-recipient
+NIP-04 envelope noted in `ROBUSTNESS_PORT_NOTES.md`) fits every cover shape.
+
+### Telegram: still simulated
+
+Telegram was prepared identically (`send_telegram.jpg`, embedded and
+pre-send-verified) but not sent through a real Telegram client this round.
+Its row in every matrix in this file, and the "45/45" and "79/80" results
+above, remain simulated-channel-profile results only. Closing this is still
+open (`STEGSTR_ENTRY_V3.md` Part 2, "Close the Telegram gap").
+
+### Reproduce
+
+`live_test/` (repo-root, gitignored via `.git/info/exclude`) has the exact
+covers, payload, and a `decode_received.sh` that PASS/FAILs anything dropped
+into `live_test/received/` against `live_test/PAYLOAD.txt`.

@@ -85,7 +85,14 @@ to do the same thing, and has anyone actually checked it? Findings:
   sent through real WhatsApp and Instagram, downloaded from the receiving
   side, and decoded byte-for-byte correctly on both. Instagram genuinely
   re-encoded the file (file size changed), confirming it was a real
-  recompression test.
+  recompression test. **WhatsApp's file came back byte-identical, which a
+  later control experiment (send an untouched original through the same
+  path) showed is because `--robust`'s pre-conditioning already puts the
+  file below WhatsApp's own recompression threshold, not because the payload
+  survived being recompressed** -- see `channel_simulator/BASELINE_RESULTS.md`,
+  "Live re-test after Phase 4," for the full control methodology and why
+  that's a different (and correct, if narrower) claim than "survives
+  WhatsApp recompression."
 - **Fixed the desktop app's actual Embed button, not just the CLI.** The GUI
   already had an `embedMethod` setting defaulting to `"qim"`, but the desktop
   (Tauri) code path ignored it and unconditionally called the "dot" scheme
