@@ -211,3 +211,45 @@ than this deliberately-adversarial synthetic worst case, and score better (textu
 SSIM) even before accounting for that. Not further tuned beyond this point given the
 robustness/invisibility tradeoff already made (see the delta re-tune above) and that the
 worst case here is not representative of typical real-world cover photos.
+
+---
+
+## Re-verified post Phase-1-bugfix campaign, against the actual Rust CLI (not the Python prototype)
+
+The results above (this file, up to this point) were measured using
+`dct_variants.encode_dct_qim`/`decode_dct_qim` -- the Python prototype the
+Rust `stego_qim.rs` implementation was ported from, not the shipped binary
+itself. BUGS.md documents a bugfix campaign that touched `stego.rs` (DWT/PNG
+path: bugs #1, #2, #4, #5) and `stego_qim.rs`'s libjpeg FFI cleanup layer
+(bug #3 -- a resource-leak fix with no change to the QIM encode/decode math
+itself). None of those fixes changed the QIM algorithm's actual coefficient
+read/write logic, but "should be unaffected" is not the same as "verified,"
+so re-ran the platform survival matrix against the **actual, current
+`stegstr-cli --robust` binary** end-to-end (not the Python prototype) --
+see `run_matrix_rust_cli.py`.
+
+Covers: the original 4 (`textured`, `highfreq`, `smooth`, `portrait`) plus 5
+more from `covers_extended/` (`high_contrast`, `low_light`, `screenshot`,
+`phone_portrait`, `narrow_tall`) -- 9 covers x 5 platforms (WhatsApp,
+Instagram, Facebook, Twitter, Telegram) = 45 combinations.
+
+**Result: 45/45 passed.** WhatsApp/Instagram/Facebook/Twitter/Telegram
+survival holds after the Phase 1 bugfix campaign, confirmed against the real
+shipped binary, not assumed from the fixes' scope.
+
+```
+cover                  whatsapp   instagram  facebook   twitter    telegram
+-----------------------------------------------------------------------------
+textured.png           PASS       PASS       PASS       PASS       PASS
+highfreq.png           PASS       PASS       PASS       PASS       PASS
+smooth.png             PASS       PASS       PASS       PASS       PASS
+portrait.png           PASS       PASS       PASS       PASS       PASS
+high_contrast.png      PASS       PASS       PASS       PASS       PASS
+low_light.png          PASS       PASS       PASS       PASS       PASS
+screenshot.png         PASS       PASS       PASS       PASS       PASS
+phone_portrait.png     PASS       PASS       PASS       PASS       PASS
+narrow_tall.png        PASS       PASS       PASS       PASS       PASS
+```
+
+Reproduce: `cd channel_simulator && python run_matrix_rust_cli.py` (requires
+`cargo build --release --bin stegstr-cli` first).
