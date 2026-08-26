@@ -494,6 +494,122 @@ process live in `channel_simulator/BASELINE_RESULTS.md` -- summary:
 
 ---
 
+## 6. Received Nostr events were never cryptographically verified
+
+**Severity:** Critical. This is a Nostr client; verifying that an event
+actually came from the pubkey it claims to is one of the protocol's core
+integrity guarantees, and it wasn't happening at all.
+
+**Repro:** construct any event-shaped object with an arbitrary `id`,
+`pubkey`, and `sig` (no real signature needed) and send it as an `EVENT`
+message from a relay -- see
+`src/__tests__/nostr-event-verify.test.ts`'s "impersonation" test, which
+does exactly this: signs a note with an attacker's own key, then relabels
+the event with a victim's pubkey, and confirms this bare object was
+previously accepted with no check.
+
+**Root cause:** `relay.ts`'s `onmessage` handler checked only that an
+incoming `EVENT` message's payload had the right *shape*
+(`e.id && e.pubkey && typeof e.created_at === "number" && ...`) -- never
+that `id` actually equals `sha256(serialize([0, pubkey, created_at, kind,
+tags, content]))`, and never that `sig` is a valid Schnorr signature over
+that id by that pubkey. `nostr-stub.ts` had signing (`finishEventAsync`)
+but no verification function at all; grepping the whole `src/` tree for
+`verify`/`schnorr.verify` found nothing related to event authenticity.
+Practical impact: any relay in the configured pool, or a MITM between the
+app and one, could inject events that display in the UI as genuinely
+posted by any pubkey -- including someone else's.
+
+**Fix:** added `nostr-stub.ts`'s `verifyEvent()` (recomputes the id hash,
+compares it, then calls `@noble/secp256k1`'s `schnorr.verify`) and wired it
+into `relay.ts`'s `onmessage` so an event only reaches the app's `onEvent`
+callback -- and therefore anywhere in the UI -- after verification passes.
+Failed verification drops the event with a `console.warn`, not a silent
+display.
+
+**Commit:** `fea5984`
+
+**Regression tests:** `src/__tests__/nostr-event-verify.test.ts` -- accepts
+a genuinely signed event; rejects tampered content, a forged id, a garbage
+signature, and the impersonation case above; rejects malformed events
+without throwing. 6/6 passing.
+
+---
+
+## 7. Publish silently treated "1 of 5 relays confirmed" the same as "5 of 5"
+
+**Severity:** Medium. Not data loss, but a UX honesty gap the plan
+specifically asked about.
+
+**Root cause:** `App.tsx`'s `publishViaRelay` only surfaced a toast when
+`publish()` resolved with `count === 0` (total failure). Any count between
+1 and the full relay list -- including a note that only reached 1 of 5
+relays, meaning most of the pool's subscribers would never see it -- looked
+identical in the UI to full success.
+
+**Fix:** added an informational toast for `0 < count < total`
+("Reached N of M relays -- some may not have received this"), distinct from
+the existing error toast for total failure.
+
+**Commit:** `fea5984`
+
+**Verified via:** `src/__tests__/relay-failure-injection.test.ts`'s
+"half the pool unreachable" test -- a real mock relay + a real unreachable
+address, confirming `publish()` itself already reported the count honestly
+(1, not 0 or 2) even before this fix; the fix is specifically about the UI
+not silently treating that 1 the same as a full 2.
+
+---
+
+## Phase 3: networking-under-failure verification (STEGSTR_ENTRY_V3.md)
+
+No Docker in this environment, so no nostr-rs-relay/strfry -- built a
+controllable in-process mock relay instead (`src/__tests__/mock-relay.ts`,
+~150 lines, speaks just enough NIP-01 to drive the real client code) and
+exercised `relay.ts`'s actual `connectRelays`/`publish` against it for each
+failure mode the plan named. See `src/__tests__/relay-failure-injection.test.ts`
+for the full test code; summary of what was verified, 7/7 passing:
+
+| failure mode | verified behavior |
+|---|---|
+| relay down | `connectRelays` doesn't throw; `onError` fires so the app can surface it; `close()` cleanly stops retry attempts |
+| relay slow (within OK timeout) | `publish()` still returns a confirmed count of 1 -- a slow-but-eventual OK isn't lost |
+| relay slow (beyond OK timeout) | `publish()` honestly returns 0, not a false success, once the timeout passes |
+| relay drops mid-subscription (before EOSE) | client detects the close (`onclose`) and reconnects -- confirmed by counting actual reconnect callback firings, not just reading the backoff code |
+| half the pool unreachable | `publish()` returns exactly the reachable count (1 of 2), not 0 (would look like total failure) and not 2 (would look like full success) |
+| clock skew | `verifyEvent` (see bug #6) accepts a legitimately-signed event with `created_at` 5 years in the future -- confirms the new verification layer doesn't start silently rejecting on freshness, which NIP-01 doesn't mandate |
+| relay rate-limiting (NIP-01 `CLOSED`) | **finding, not fixed:** `relay.ts`'s `onmessage` has no case for `msg[0] === "CLOSED"` (or `"NOTICE"`) at all. Sending `CLOSED` in response to a `REQ` is silently ignored -- no re-subscribe, no user-visible signal distinguishing "relay actively rejected this subscription" from "relay just has nothing to send yet." Confirmed via the mock relay: the client received the message (`gotClosed === true`) but `onEose` correctly never fired and nothing else happened either. |
+
+**Duplicate event deduplication:** confirmed correct on the main feed
+ingestion path -- `App.tsx`'s `flush()` builds `new Map(prev.map((e) => [e.id, e]))`
+before merging in a new batch, so a duplicate `id` overwrites in place
+rather than appending; the final array can never contain two entries with
+the same id.
+
+**Offline outbox surviving a restart: finding, not fixed.** There IS a
+persistent, restart-surviving queue in this codebase -- but only for zaps
+(`BASE_ZAP_QUEUE`, backed by `localStorage`, loaded on mount via
+`loadQueuedZaps`, flushed automatically when the network becomes available
+again). Every other `publishViaRelay` call site (posts, replies, DMs,
+likes, follows, reactions, profile edits, contact-list updates) follows the
+same pattern: the event is added to local `events` state unconditionally,
+then `publishViaRelay` is called *only if* `networkEnabled && canPublishToNetwork`
+-- and if that publish resolves with 0 confirmations, or is never attempted
+because the app was offline, there is no retry and no persistence. `events`
+itself is a plain `useState<NostrEvent[]>([])` with no `localStorage`
+read/write anywhere (confirmed by grep -- no `loadEvents`/`BASE_EVENTS`
+pattern exists, unlike the zap queue's explicit one). A post composed while
+offline, or one where every relay in the pool was unreachable, is visible
+in the current session but is gone -- not just unsent, entirely gone, not
+recoverable -- the moment the app restarts. The zap queue is a working,
+precedented pattern for the fix (persist an outbox to `localStorage`,
+flush on reconnect); extending it to general events was not attempted here
+given the time available, since it's a real feature addition (a new
+persisted queue + flush wiring across every `publishViaRelay` call site)
+rather than a small fix.
+
+---
+
 ## Also investigated, not a bug
 
 - **`--payload-base64` has no `@file` form.** `--payload @file` requires the
