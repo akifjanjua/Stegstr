@@ -93,6 +93,46 @@ sizes (1024x1024 and 1536x1536, 10 seeds each, payloads up to 2000 bytes) to
 specifically hunt for bug #2's residual "no LH value avoids clamping" case in
 our own encoder: 60 round trips, **0 failures**.
 
+## cargo-fuzz on decode_any(): deferred, Windows-specific linker limitation
+
+Set up `src-tauri/fuzz/` (`cargo fuzz init`, target `decode_any` in
+`fuzz_targets/decode_any.rs`, fuzzing `stegstr_lib::decode_any` -- the exact
+entry point exercised whenever a user opens any image file, tried against
+arbitrary bytes written to a temp file each iteration since the QIM/libjpeg
+FFI path needs a real file handle, not an in-memory reader).
+
+Time-boxed this at 20 minutes given it was fighting the Windows/MSVC
+toolchain rather than the actual code:
+- Installing `cargo-fuzz` requires the nightly toolchain (installed cleanly).
+- First build attempt failed: `cargo fuzz build` resolves its own
+  `fuzz/Cargo.lock` independently of the main crate's pinned lock, and pulled
+  in `tauri 2.11.5` (main crate is pinned to `2.9.5`) plus newer
+  `tauri-plugin-*` versions with an incompatible `tauri-codegen` pairing --
+  `tauri::generate_context!()` failed to compile
+  (`missing field 'referenced_by' in initializer of 'ResolvedCommand'`).
+  Fixed by copying the main crate's `Cargo.lock` into `fuzz/Cargo.lock` so
+  the shared dependency graph resolves identically.
+- Second attempt got past compilation and all the way to the link step, then
+  failed with `LNK1561: entry point must be defined`. This is a known,
+  documented libFuzzer-on-Windows-MSVC limitation (libFuzzer's runtime and
+  MSVC's linker disagree about the entry point in this configuration) --
+  not something specific to this codebase, and not a quick fix within the
+  time-box (the standard workaround is switching to the `x86_64-pc-windows-gnu`
+  target or building on Linux, either of which means re-downloading and
+  re-compiling the entire dependency tree again from scratch).
+
+**Deferred, not abandoned:** the scaffolding (`fuzz/Cargo.toml`,
+`fuzz_targets/decode_any.rs`) is committed and ready to run as-is on Linux,
+which is cargo-fuzz's fully-supported platform and also where Phase 2's CI
+matrix already needs to build and test anyway -- the natural place to
+actually run this, not a Windows dev machine. Until then, coverage of the
+same "arbitrary/malformed bytes into the decode path" concern comes from: the
+proptest property test (found bug #4), the adversarial image corpus (found
+bug #3's leak via `notreally.jpg`), and the `attack.py` crash-sweep script
+that ran every corpus image + payload combination through both encoders
+checking for non-clean exit codes or panic signatures. None of that is a
+substitute for real coverage-guided fuzzing, but it's not nothing either.
+
 ## Adversarial image corpus: exact coverage manifest
 
 Every entry actually generated and exercised (embed + decode, both encoders,
