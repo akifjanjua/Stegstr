@@ -349,7 +349,20 @@ pub fn encode(image_path: &std::path::Path, payload: &[u8]) -> Result<Vec<u8>, S
             }
             let mut tile = Vec::with_capacity((tw_even * th_even * 4) as usize);
             for y in 0..th_even {
-                let row_start = ((ty + y) * w * 4) as usize;
+                // BUG (fixed): this was missing `+ tx * 4`, so every tile read
+                // pixel data starting at column 0 regardless of its own x
+                // position. For any image wider than one tile (> TILE_SIZE),
+                // every tile except the leftmost column got embedded with a
+                // COPY of column-0 pixel data, then written back at its own
+                // (correct) output position -- silently overwriting that whole
+                // region with unrelated content. The payload still decoded
+                // correctly (decode finds it in the untouched tile at tx=0),
+                // which is exactly why this was invisible to every
+                // payload-correctness round-trip test and only showed up in a
+                // cover-vs-stego pixel comparison (PSNR ~9dB, not the ~30-65dB
+                // expected -- essentially the whole non-leftmost image visibly
+                // wrecked, not steganographically hidden at all).
+                let row_start = ((ty + y) * w * 4 + tx * 4) as usize;
                 let row_end = row_start + (tw_even * 4) as usize;
                 tile.extend_from_slice(&raw[row_start..row_end]);
             }
@@ -559,6 +572,65 @@ mod tests {
         let encoded = encode(&cover_path, &payload).unwrap();
         let out_path = std::env::temp_dir().join("stego_test_contrast_out.png");
         std::fs::write(&out_path, &encoded).unwrap();
+
+        let decoded = decode(&out_path).unwrap();
+        assert_eq!(decoded, payload);
+
+        let _ = std::fs::remove_file(cover_path);
+        let _ = std::fs::remove_file(out_path);
+    }
+
+    /// Regression test for BUGS.md #5: `encode()`'s tile-extraction loop was
+    /// missing `+ tx * 4` in its row offset, so every tile except the leftmost
+    /// column read (and then embedded-and-overwrote) column-0 pixel data
+    /// instead of its own. Payload correctness round-trip tests never caught
+    /// this -- decode finds the payload in the untouched tx=0 tile and returns
+    /// immediately -- so this test checks image FIDELITY, not just payload
+    /// recovery: every tile outside the leftmost column must stay close to its
+    /// original pixels (small LSB-only deltas), not get replaced wholesale.
+    #[test]
+    fn test_encode_does_not_corrupt_non_leftmost_tiles() {
+        let (w, h) = (512u32, 256u32); // two tiles wide, one tall
+        let mut img = image::RgbaImage::new(w, h);
+        for (i, p) in img.pixels_mut().enumerate() {
+            let v = (i % 256) as u8;
+            *p = image::Rgba([v, v.wrapping_add(7), v.wrapping_add(13), 255]);
+        }
+        let mut png_bytes = Vec::new();
+        PngEncoder::new(&mut png_bytes)
+            .write_image(img.as_raw(), w, h, ExtendedColorType::Rgba8)
+            .unwrap();
+        let cover_path = std::env::temp_dir().join("stego_test_tile_fidelity_cover.png");
+        std::fs::write(&cover_path, &png_bytes).unwrap();
+
+        let payload = b"tile fidelity check";
+        let encoded = encode(&cover_path, payload).unwrap();
+        let out_path = std::env::temp_dir().join("stego_test_tile_fidelity_out.png");
+        std::fs::write(&out_path, &encoded).unwrap();
+
+        let stego_img = image::open(&out_path).unwrap().to_rgba8();
+        let cover_raw = img.as_raw();
+        let stego_raw = stego_img.as_raw();
+        let stride = (w * 4) as usize;
+
+        // The right tile (columns 256..512) must be close to its original
+        // pixels (LSB-scale changes only), not overwritten with the left
+        // tile's content.
+        let mut max_delta = 0i32;
+        for y in 0..h as usize {
+            for x in 256..w as usize {
+                for ch in 0..4 {
+                    let idx = y * stride + x * 4 + ch;
+                    let delta = (cover_raw[idx] as i32 - stego_raw[idx] as i32).abs();
+                    max_delta = max_delta.max(delta);
+                }
+            }
+        }
+        assert!(
+            max_delta <= 4,
+            "right tile changed by up to {max_delta} (expected small LSB-scale deltas only -- \
+             a large delta means the tile-extraction offset bug is back"
+        );
 
         let decoded = decode(&out_path).unwrap();
         assert_eq!(decoded, payload);
