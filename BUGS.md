@@ -461,6 +461,39 @@ payload-only round-trip tests structurally cannot.
 
 ---
 
+## Phase 4: adaptive per-cover QIM delta (feature, not a bug fix)
+
+Not a bug -- STEGSTR_ENTRY_V3.md Phase 4 asked for the known flat-cover SSIM
+weak point (~0.70) to be addressed with adaptive embedding strength. Full
+writeup, honest tradeoff table, and the (non-monotonic!) delta-tuning
+process live in `channel_simulator/BASELINE_RESULTS.md` -- summary:
+
+- Shipped **per-cover** adaptive delta (flat covers: `QIM_DELTA_FLAT=12`;
+  everything else: unchanged `16`), not literal per-8x8-block adaptivity as
+  the brief described -- QIM's decode needs the exact delta used at embed
+  time, which per-block adaptivity can't reliably guarantee without a large
+  side-channel. See `stego_qim.rs`'s `DELTA TIERS` comment for the full
+  reasoning.
+- Result: the specific worst case measured before (`smooth`, 0.662 SSIM)
+  improved to 0.758; every cover that classified flat gained +0.06 to +0.10
+  SSIM; simulated-platform survival held at 45/45 both before and after on
+  the primary 9-cover corpus.
+- The delta value (12) came from re-testing the **actual Rust binary**
+  end-to-end after the Python-prototype-calibrated value (10) broke 7/45 on
+  simulated Telegram -- the real binary's larger header shifts which
+  physical coefficients carry the payload, which the Python proxy never
+  modeled. 14 tested *worse* than both 12 and 16 (non-monotonic).
+- **Known residual gap:** a literal solid-color cover (0.0 AC energy, not
+  achievable by any real photo) failed the harshest simulated platform even
+  at delta=12 -- 1 of 125 total combinations tested. Documented, not fixed.
+
+**Commit:** see the commit introducing `DELTA TIERS` in `stego_qim.rs`.
+
+**Regression tests:** `stego_qim::tests::test_adaptive_delta_roundtrip_flat_and_busy_covers`,
+`stego_qim::tests::test_average_ac_magnitude_separates_flat_from_busy`.
+
+---
+
 ## Also investigated, not a bug
 
 - **`--payload-base64` has no `@file` form.** `--payload @file` requires the
