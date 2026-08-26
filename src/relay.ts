@@ -4,6 +4,7 @@
  */
 
 import type { NostrEvent } from "./types";
+import { verifyEvent } from "./nostr-stub";
 
 /** URL where the app fetches relay list (JSON with "relays" array). */
 export const STEGSTR_CONFIG_URL = "https://www.stegstr.com/config/relay.json";
@@ -143,11 +144,26 @@ function connectRelay(
           if (msg[0] === "EVENT" && msg[2]) {
             const e = msg[2] as NostrEvent;
             if (e.id && e.pubkey && typeof e.created_at === "number" && typeof e.kind === "number" && e.content !== undefined) {
-              try {
-                onEvent(e);
-              } catch (err) {
-                console.error("[relay] onEvent error", err);
-              }
+              // Structural shape alone proves nothing -- a relay (or a MITM
+              // between us and one) could hand back any id/pubkey/content
+              // combination it likes. Verify the id actually hashes to this
+              // content and the signature actually matches pubkey+id before
+              // treating the event as genuine; a relay is a message
+              // transport, not a trusted source of truth for who said what.
+              verifyEvent(e)
+                .then((valid) => {
+                  if (closed) return;
+                  if (!valid) {
+                    console.warn("[relay] dropped event with invalid id/signature", e.id, e.pubkey);
+                    return;
+                  }
+                  try {
+                    onEvent(e);
+                  } catch (err) {
+                    console.error("[relay] onEvent error", err);
+                  }
+                })
+                .catch((err) => console.error("[relay] verifyEvent error", err));
             }
           }
           if (msg[0] === "EOSE") {

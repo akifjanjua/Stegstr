@@ -638,10 +638,18 @@ function App({ profile }: { profile: string | null }) {
 
   const publishViaRelay = useCallback((ev: NostrEvent) => {
     const confirmed = relayRef.current ? relayRef.current.publish(ev) : publishEvent(ev, relayUrls);
+    const total = relayUrls.length;
     confirmed
       .then((count) => {
         if (count === 0) {
           toast.error("Could not reach any relay -- this post/message may not have sent. Check your connection and try again.");
+        } else if (total > 0 && count < total) {
+          // A socket accepting a write is not a delivery guarantee -- only
+          // report success for the relays that actually sent back NIP-01 OK.
+          // Silently treating "1 of 5 relays confirmed" the same as "5 of 5"
+          // hides real delivery risk (the other 4 relays' subscribers may
+          // never see this note) behind a UI that looks identical either way.
+          toast.info(`Reached ${count} of ${total} relays -- some may not have received this.`);
         }
       })
       .catch(() => {
