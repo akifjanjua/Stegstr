@@ -86,6 +86,7 @@ const QIM_ERASURE_MARGIN: f64 = QIM_DELTA / 6.0;
 /// no platform in the target set will touch -- never resize based on a guessed
 /// destination, since forwarding through a second platform or guessing wrong
 /// defeats it entirely.
+#[derive(Default)]
 pub enum Robustness {
     /// Safe for WhatsApp (800), Instagram (1080), Telegram (1280) -- the three
     /// platforms the spec requires surviving. Higher resolution output.
@@ -93,6 +94,7 @@ pub enum Robustness {
     /// Also safe for Twitter/X-style aggressive downscaling (600). Empirically
     /// 100% pass rate across every platform x cover-type combination tested.
     /// Default: safer with only a modest resolution cost.
+    #[default]
     Max,
 }
 
@@ -102,12 +104,6 @@ impl Robustness {
             Robustness::Standard => 768,
             Robustness::Max => 576,
         }
-    }
-}
-
-impl Default for Robustness {
-    fn default() -> Self {
-        Robustness::Max
     }
 }
 
@@ -267,10 +263,10 @@ mod rs {
                 .filter(|&&p| p >= base && p < base + chunk.len())
                 .map(|&p| (p - base) as u8)
                 .collect();
-            let mut buf = chunk.to_vec();
+            let buf = chunk.to_vec();
             let erasures_opt = if local_erasures.is_empty() { None } else { Some(&local_erasures[..]) };
             let recovered = dec
-                .correct(&mut buf, erasures_opt)
+                .correct(&buf, erasures_opt)
                 .map_err(|e| format!("RS decode failed: {:?}", e))?;
             out.extend_from_slice(recovered.data());
         }
@@ -468,8 +464,8 @@ pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
     let mut header_bits_raw = Vec::with_capacity(n_header_slots);
     let mut header_margins_raw = Vec::with_capacity(n_header_slots);
-    for i in 0..n_header_slots {
-        let (bit, margin) = read_bit(perm[i]);
+    for &slot in perm.iter().take(n_header_slots) {
+        let (bit, margin) = read_bit(slot);
         header_bits_raw.push(bit);
         header_margins_raw.push(margin);
     }
@@ -490,8 +486,8 @@ pub fn decode(path: &Path) -> Result<Option<Vec<u8>>, String> {
 
     let mut codeword_bits_raw = Vec::with_capacity(n_codeword_bits * QIM_REPEAT);
     let mut codeword_margins_raw = Vec::with_capacity(n_codeword_bits * QIM_REPEAT);
-    for i in n_header_slots..needed {
-        let (bit, margin) = read_bit(perm[i]);
+    for &slot in perm.iter().take(needed).skip(n_header_slots) {
+        let (bit, margin) = read_bit(slot);
         codeword_bits_raw.push(bit);
         codeword_margins_raw.push(margin);
     }
@@ -769,7 +765,7 @@ mod ffi {
             let mut dst_guard = CompressGuard { cinfo: dstinfo, fp: out_fp };
 
             jpeg_stdio_dest(&mut dst_guard.cinfo, dst_guard.fp as *mut _);
-            jpeg_copy_critical_parameters(&mut src_guard.cinfo, &mut dst_guard.cinfo);
+            jpeg_copy_critical_parameters(&src_guard.cinfo, &mut dst_guard.cinfo);
             jpeg_write_coefficients(&mut dst_guard.cinfo, coef_arrays);
             jpeg_finish_compress(&mut dst_guard.cinfo);
             jpeg_finish_decompress(&mut src_guard.cinfo);

@@ -29,8 +29,8 @@ fn load_image_with_orientation(image_path: &std::path::Path) -> Result<image::Rg
 fn ensure_even_dimensions(img: &image::RgbaImage) -> image::RgbaImage {
     let w = img.width();
     let h = img.height();
-    let w_even = if w % 2 == 0 { w } else { w.saturating_sub(1) };
-    let h_even = if h % 2 == 0 { h } else { h.saturating_sub(1) };
+    let w_even = if w.is_multiple_of(2) { w } else { w.saturating_sub(1) };
+    let h_even = if h.is_multiple_of(2) { h } else { h.saturating_sub(1) };
     if w_even == w && h_even == h {
         img.clone()
     } else {
@@ -54,9 +54,9 @@ fn haar2d_forward(
     let mut hh = vec![0i32; half_w * half_h];
     for i in 0..half_h {
         for j in 0..half_w {
-            let a = img[(i * 2 + 0) * stride + (j * 2 + 0) * 4 + ch] as i32;
-            let b = img[(i * 2 + 0) * stride + (j * 2 + 1) * 4 + ch] as i32;
-            let c = img[(i * 2 + 1) * stride + (j * 2 + 0) * 4 + ch] as i32;
+            let a = img[(i * 2) * stride + (j * 2) * 4 + ch] as i32;
+            let b = img[(i * 2) * stride + (j * 2 + 1) * 4 + ch] as i32;
+            let c = img[(i * 2 + 1) * stride + (j * 2) * 4 + ch] as i32;
             let d = img[(i * 2 + 1) * stride + (j * 2 + 1) * 4 + ch] as i32;
             let idx = i * half_w + j;
             ll[idx] = (a + b + c + d) / 4;
@@ -68,6 +68,7 @@ fn haar2d_forward(
     (ll, lh, hl, hh)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn haar2d_inverse(
     out: &mut [u8],
     w: u32,
@@ -92,9 +93,9 @@ fn haar2d_inverse(
             let b = (ll_ij + lh_ij - hl_ij + hh_ij).clamp(0, 255);
             let c = (ll_ij - lh_ij + hl_ij + hh_ij).clamp(0, 255);
             let d = (ll_ij + lh_ij + hl_ij - hh_ij).clamp(0, 255);
-            out[(i * 2 + 0) * stride + (j * 2 + 0) * 4 + ch] = a as u8;
-            out[(i * 2 + 0) * stride + (j * 2 + 1) * 4 + ch] = b as u8;
-            out[(i * 2 + 1) * stride + (j * 2 + 0) * 4 + ch] = c as u8;
+            out[(i * 2) * stride + (j * 2) * 4 + ch] = a as u8;
+            out[(i * 2) * stride + (j * 2 + 1) * 4 + ch] = b as u8;
+            out[(i * 2 + 1) * stride + (j * 2) * 4 + ch] = c as u8;
             out[(i * 2 + 1) * stride + (j * 2 + 1) * 4 + ch] = d as u8;
         }
     }
@@ -352,15 +353,12 @@ pub fn encode(image_path: &std::path::Path, payload: &[u8]) -> Result<Vec<u8>, S
                 let row_end = row_start + (tw_even * 4) as usize;
                 tile.extend_from_slice(&raw[row_start..row_end]);
             }
-            match embed_in_tile(&tile, tw_even, th_even, &to_embed) {
-                Ok(modified) => {
-                    for (y, row) in modified.chunks((tw_even * 4) as usize).enumerate() {
-                        let out_row_start = ((ty + y as u32) * w * 4 + tx * 4) as usize;
-                        out_img[out_row_start..out_row_start + row.len()].copy_from_slice(row);
-                    }
-                    embedded_any = true;
+            if let Ok(modified) = embed_in_tile(&tile, tw_even, th_even, &to_embed) {
+                for (y, row) in modified.chunks((tw_even * 4) as usize).enumerate() {
+                    let out_row_start = ((ty + y as u32) * w * 4 + tx * 4) as usize;
+                    out_img[out_row_start..out_row_start + row.len()].copy_from_slice(row);
                 }
-                Err(_) => {}
+                embedded_any = true;
             }
         }
     }
@@ -393,17 +391,17 @@ pub fn encode(image_path: &std::path::Path, payload: &[u8]) -> Result<Vec<u8>, S
 /// rare case where `encode()` itself fell back to a whole-image transform
 /// because no single tile had capacity for the payload.
 ///
-/// BUG (fixed): this used to try the whole-image transform first. For any image
-/// >= TILE_SIZE, a whole-image Haar2D transform indexes LH coefficients by the
+/// BUG (fixed): this used to try the whole-image transform first. For a large
+/// enough image, a whole-image Haar2D transform indexes LH coefficients by the
 /// image's full width, not each tile's own 256-wide local grid the encoder used.
 /// The two orderings only agree for the first 128 bits (one tile-local row), so
-/// once a payload's header+data spans more than one row (> ~9 payload bytes)
-/// the whole-image bit sequence silently diverges from what was actually
-/// embedded. `decode_from_tile`'s magic search has no integrity check beyond
-/// "declared length fits available bits", so it returned a magic-shaped but
-/// corrupted match instead of ever reaching the tile-aligned search below,
+/// once a payload's header+data spans more than one row (roughly 9+ payload
+/// bytes) the whole-image bit sequence silently diverges from what was
+/// actually embedded. `decode_from_tile`'s magic search has no integrity check
+/// beyond "declared length fits available bits", so it returned a magic-shaped
+/// but corrupted match instead of ever reaching the tile-aligned search below,
 /// which does reproduce the exact per-tile transform and always decodes
-/// correctly for any un-cropped image >= TILE_SIZE.
+/// correctly for any un-cropped, large-enough image.
 pub fn decode(image_path: &std::path::Path) -> Result<Vec<u8>, String> {
     let img_rgba = load_image_with_orientation(image_path)?;
     let img_rgba = ensure_even_dimensions(&img_rgba);
