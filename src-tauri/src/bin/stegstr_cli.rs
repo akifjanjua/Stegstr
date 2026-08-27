@@ -23,7 +23,19 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// `#[path]`, not the usual src/bin/stegstr_cli/{calibrate,mcp}.rs directory
+// form: Tauri's bundler (deb/msi at least) has a known issue discovering the
+// right binary output path when a package has multiple [[bin]] targets,
+// and switching this binary to the directory-module layout was enough to
+// trigger it in CI (see BUGS.md's AI-agent-operability entry) even though
+// nothing in Cargo.toml's declared bin *name* changed. Keeping this file
+// flat at src/bin/stegstr_cli.rs -- exactly the layout that built cleanly
+// before this feature existed -- and pulling the submodules in from
+// src/bin_support/ (deliberately outside src/bin/, so cargo's default
+// binary auto-discovery never sees them as their own targets) avoids it.
+#[path = "../bin_support/calibrate.rs"]
 mod calibrate;
+#[path = "../bin_support/mcp.rs"]
 mod mcp;
 
 const STEGSTR_SUFFIX: &str = " Sent by Stegstr.";

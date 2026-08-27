@@ -21,7 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "stegstr-cli"
-path = "src/bin/stegstr_cli/main.rs"
+path = "src/bin/stegstr_cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
