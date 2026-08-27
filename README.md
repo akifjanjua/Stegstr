@@ -70,6 +70,19 @@ Windows: `scripts\verify.ps1` (same steps, PowerShell). Needs Rust, and
 optionally Node.js + Python for the frontend tests and channel-simulator
 matrix (skippable: `./scripts/verify.sh --skip-python`).
 
+**Expect this to take a while on a cold machine** — roughly 10-20 minutes
+with no warm caches (network- and CPU-dependent), most of it the Rust
+release build alone (measured at ~7-8 minutes from an empty `target/`).
+The script prints a heartbeat line every 20 seconds during long steps and
+a `[step N]` marker with elapsed time per step, so a quiet stretch is
+normal, not a hang — `cargo`'s own `Compiling <crate>` output is the sign
+of life during the build itself.
+
+If `npm test` reports a timeout waiting for a worker process to start,
+that's a resource-contention flake (something else on the machine was
+compiling at the same moment), not a real test failure — it doesn't
+happen when nothing else is running concurrently. Just re-run it.
+
 ## Build from source (full app)
 
 Prerequisites: Node.js 18+, Rust (latest stable).
