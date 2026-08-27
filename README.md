@@ -2,7 +2,7 @@
 
 <!-- Demo video slot: STEGSTR_VIDEO_ENTRY_BRIEF.md's shot list, once recorded. -->
 
-**Steganographic social networking.** Hide messages in images and share them anywhere — local-first, with optional Nostr sync. This fork of [brunkstr/Stegstr](https://github.com/brunkstr/Stegstr) fixes 5 pre-existing bugs (including a Nostr signature-spoofing vulnerability), fixes 3 more found in its own new work, and adds JPEG-domain steganography that survives WhatsApp and Instagram recompression — confirmed with real sends, not just simulation.
+**Steganographic social networking.** Hide messages in images and share them anywhere — local-first, with optional Nostr sync. This fork of [brunkstr/Stegstr](https://github.com/brunkstr/Stegstr) fixes 9 bugs — 5 pre-existing in upstream (including a Nostr signature-spoofing vulnerability), 3 more found in its own new work — and adds JPEG-domain steganography that survives WhatsApp and Instagram recompression — confirmed with real sends, not just simulation.
 
 ## Download v0.1.0
 
@@ -34,7 +34,9 @@ All builds and the release itself run in [GitHub Actions from a clean clone](htt
 - Publish silently treated "1 of 5 relays confirmed" the same as "5 of 5" in the UI. ([BUGS.md #7](BUGS.md#7-publish-silently-treated-1-of-5-relays-confirmed-the-same-as-5-of-5))
 - **Security-relevant:** an old QIM image (pre-adaptive-delta header format) could crash the app outright via a Reed-Solomon buffer underflow — a malformed/mismatched header, not just an incompatibility. Fixed with a bounds check plus a versioned decoder that still reads the old format. ([BUGS.md #8](BUGS.md#8-old-qim-images-16-bit-header-failed-to-decode-against-the-current-binary----and-worse-could-crash-the-process))
 
-Plus repo and toolchain fixes: 8 npm vulnerabilities (1 critical), a broken `mobile-android` git submodule failing every CI checkout, no declared Rust MSRV, and outdated GitHub Actions. Full detail on all 8 application bugs, with repro steps, root cause, fix commit, and regression test each: [`BUGS.md`](BUGS.md). Consolidated report with before/after numbers and an honest "what we did not test" section: [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md).
+**One more, found in a later regression pass, that doesn't cleanly fit either group above:** the default decoder trusted a file's extension over its actual content, so a valid image saved with the "wrong" extension failed with a misleading "corrupt file" error. The faulty line is identical to upstream's, but upstream has no second encoder and never promises extension-agnostic decoding — the bug only became reachable once this fork's own dual-encoder decode path existed. ([BUGS.md #9](BUGS.md#9-default-decoder-trusted-the-file-extension-instead-of-the-files-actual-content-breaking-decode_anys-own-documented-promise))
+
+Plus repo and toolchain fixes: 8 npm vulnerabilities (1 critical), a broken `mobile-android` git submodule failing every CI checkout, no declared Rust MSRV, and outdated GitHub Actions. Full detail on all 9 application bugs, with repro steps, root cause, fix commit, and regression test each: [`BUGS.md`](BUGS.md). Consolidated report with before/after numbers and an honest "what we did not test" section: [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md).
 
 ## Live platform results — stated precisely
 
@@ -104,7 +106,7 @@ Binary: `target/release/stegstr-cli` (Windows: `stegstr-cli.exe`).
 
 - [Latest release](https://github.com/akifjanjua/Stegstr/releases/latest) — downloads for all platforms
 - [Robustness report](ROBUSTNESS_REPORT.md) — before/after numbers, live-platform confirmation, what wasn't tested
-- [Bugs found and fixed](BUGS.md) — 8 bugs (5 pre-existing upstream, 3 in this fork's own work), repro steps, root cause, fix, regression test each
+- [Bugs found and fixed](BUGS.md) — 9 bugs (5 pre-existing upstream, 3 in this fork's own work, 1 that's neither), repro steps, root cause, fix, regression test each
 - [Evidence images](docs/evidence/) — visual proof of the image-destruction bug, upstream vs. fixed
 - [What changed in this fork and why](ROBUSTNESS_PORT_NOTES.md)
 - [Website](https://stegstr.com) — Downloads, getting started, wiki (this is the original upstream project's site, not this fork's)

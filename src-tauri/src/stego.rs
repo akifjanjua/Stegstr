@@ -17,7 +17,18 @@ const TILE_SIZE: u32 = 256;
 const DECODE_STEP: u32 = 128;
 
 fn load_image_with_orientation(image_path: &std::path::Path) -> Result<image::RgbaImage, String> {
-    let reader = ImageReader::open(image_path).map_err(|e| e.to_string())?;
+    // `with_guessed_format` sniffs the actual magic bytes rather than trusting
+    // the file extension `ImageReader::open` alone would use -- without it, a
+    // genuine PNG stego image saved (or renamed) with a `.jpg` extension fails
+    // here with a misleading "illegal start bytes" JPEG-parse error instead of
+    // decoding correctly, contradicting decode_any()'s documented contract
+    // that the caller doesn't need to know which encoder produced an image.
+    // The QIM/JPEG path doesn't have this problem: it already sniffs the SOI
+    // marker directly (see bug #3's fix) rather than trusting the extension.
+    let reader = ImageReader::open(image_path)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
@@ -485,6 +496,41 @@ mod tests {
         let payload = b"Hello, Stegstr!";
         let encoded = encode(&cover_path, payload).unwrap();
         let out_path = std::env::temp_dir().join("stego_test_out.png");
+        std::fs::write(&out_path, &encoded).unwrap();
+
+        let decoded = decode(&out_path).unwrap();
+        assert_eq!(decoded, payload);
+
+        let _ = std::fs::remove_file(cover_path);
+        let _ = std::fs::remove_file(out_path);
+    }
+
+    /// Regression test for the extension-vs-content mismatch found during
+    /// the post-Phase-4 regression sweep: `decode()` must sniff the actual
+    /// file content, not trust the extension, exactly like the QIM/JPEG path
+    /// already does via its SOI-marker check (bug #3). Before the fix,
+    /// `ImageReader::open` picked a JPEG decoder for a `.jpg`-named path
+    /// regardless of its real (PNG) content, failing with a misleading
+    /// "illegal start bytes" error instead of decoding correctly.
+    #[test]
+    fn test_decode_ignores_misleading_extension() {
+        let mut img = image::RgbaImage::new(256, 256);
+        for (i, p) in img.pixels_mut().enumerate() {
+            let v = (i % 256) as u8;
+            *p = image::Rgba([v, v.wrapping_add(1), v.wrapping_add(2), 255]);
+        }
+        let mut png_bytes = Vec::new();
+        let encoder = PngEncoder::new(&mut png_bytes);
+        encoder
+            .write_image(img.as_raw(), 256, 256, ExtendedColorType::Rgba8)
+            .unwrap();
+        let cover_path = std::env::temp_dir().join("stego_test_ext_cover.png");
+        std::fs::write(&cover_path, &png_bytes).unwrap();
+
+        let payload = b"extension should not matter";
+        let encoded = encode(&cover_path, payload).unwrap();
+        // Genuine PNG bytes, deliberately saved with a misleading .jpg name.
+        let out_path = std::env::temp_dir().join("stego_test_ext_out.jpg");
         std::fs::write(&out_path, &encoded).unwrap();
 
         let decoded = decode(&out_path).unwrap();

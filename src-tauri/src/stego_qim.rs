@@ -1143,4 +1143,112 @@ mod tests {
         let _ = std::fs::remove_file(&cover_path);
         let _ = std::fs::remove_file(&legacy_out);
     }
+
+    /// Attacks the dual-format decoder directly with adversarial coefficient
+    /// data: every trial writes fully random bits into the header AND body
+    /// slots (so the 24-bit reading, the 16-bit fallback reading, and
+    /// whatever codeword length either one derives from that noise are all
+    /// attacker-controlled), then calls the real public `decode()`. This is
+    /// exactly the class of input BUGS.md #8 found a crash in (a
+    /// Reed-Solomon buffer underflow from a garbled codeword length) --
+    /// after that fix, the two format attempts trying arbitrary/ambiguous
+    /// bit patterns against each other should never panic, only ever return
+    /// `Ok(None)` or `Err(..)` cleanly. Wrapped in `catch_unwind` so a
+    /// regression here fails this one test with the seed, instead of
+    /// aborting the whole test binary.
+    #[test]
+    fn test_dual_format_decode_survives_adversarial_header_bytes() {
+        let cover_path = std::env::temp_dir().join("stego_qim_test_adversarial_cover.png");
+        write_png(&cover_path, 256, 256, |_, _| [128, 128, 128]);
+        let tmp_in = std::env::temp_dir().join("stego_qim_test_adversarial_in.jpg");
+        {
+            let img = image::open(&cover_path).unwrap().to_rgb8();
+            let mut f = std::fs::File::create(&tmp_in).unwrap();
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, QIM_EMBED_QUALITY);
+            enc.encode(&img, img.width(), img.height(), image::ExtendedColorType::Rgb8).unwrap();
+        }
+        let (stream_len, blocks_wide, blocks_high) = {
+            let base_jpeg = ffi::read_y_coefficients(&tmp_in).unwrap();
+            (
+                coeff_stream(base_jpeg.blocks_wide, base_jpeg.blocks_high).len(),
+                base_jpeg.blocks_wide,
+                base_jpeg.blocks_high,
+            )
+        };
+        let stream = coeff_stream(blocks_wide, blocks_high);
+        let perm = fixed_permutation(stream_len);
+
+        // Enough slots for both header interpretations plus a plausible
+        // (attacker-chosen-length) body -- covers the "codeword length
+        // claims more data than actually follows" case too, since a random
+        // 16-bit length is very likely to exceed what's actually available.
+        let n_noise_slots = stream_len.min(20_000);
+
+        for seed in 0u64..300 {
+            // Re-read fresh coefficients each iteration (YCoefficients isn't
+            // Clone) rather than mutating a shared decoded copy across seeds.
+            let mut jpeg = ffi::read_y_coefficients(&tmp_in).unwrap();
+            let mut state = seed ^ 0x9E3779B97F4A7C15;
+            for &slot in perm.iter().take(n_noise_slots) {
+                let (by, bx, zi) = stream[slot as usize];
+                let (dy, dx) = zigzag_rc(zi);
+                let bit = (splitmix64_next(&mut state) & 1) as u8;
+                // Alternate delta so neither the 24-bit nor the 16-bit
+                // reading gets a consistent single-delta advantage.
+                let delta = if splitmix64_next(&mut state) & 1 == 0 {
+                    QIM_HEADER_DELTA
+                } else {
+                    QIM_DELTA_FLAT
+                };
+                let c = jpeg.get(by, bx, dy, dx) as f64;
+                let v = qim_embed(c, bit, delta).clamp(-32767, 32767) as i16;
+                jpeg.set(by, bx, dy, dx, v);
+            }
+            let out_path = std::env::temp_dir().join(format!("stego_qim_adversarial_{seed}.jpg"));
+            ffi::write_y_coefficients(&tmp_in, &jpeg, &out_path).unwrap();
+
+            let result = std::panic::catch_unwind(|| decode(&out_path));
+            let _ = std::fs::remove_file(&out_path);
+            assert!(
+                result.is_ok(),
+                "decode() panicked on adversarial header/body noise, seed={seed}"
+            );
+            // Whatever it returned, it must be a clean Result -- either a
+            // descriptive Err or Ok(None)/Ok(Some(garbage)) is acceptable,
+            // a panic is not. (A coincidental RS+7-byte-magic false
+            // positive on pure noise is not a realistic concern here --
+            // same reasoning the dual-format decoder's own doc comment
+            // already relies on.)
+            let _ = result.unwrap();
+        }
+
+        let _ = std::fs::remove_file(&cover_path);
+        let _ = std::fs::remove_file(&tmp_in);
+    }
+
+    /// Companion to the adversarial-noise test above: a cover too small to
+    /// even hold a full header in either format must fail cleanly (`Ok(None)`
+    /// or a descriptive `Err`), not panic, no matter what garbage is in its
+    /// few available coefficients.
+    #[test]
+    fn test_dual_format_decode_survives_truncated_tiny_cover() {
+        let cover_path = std::env::temp_dir().join("stego_qim_test_tiny_cover.png");
+        write_png(&cover_path, 8, 8, |x, y| {
+            [((x * 37 + y) & 0xFF) as u8, ((x * 13) & 0xFF) as u8, ((y * 29) & 0xFF) as u8]
+        });
+        let out_path = std::env::temp_dir().join("stego_qim_test_tiny_out.jpg");
+        {
+            let img = image::open(&cover_path).unwrap().to_rgb8();
+            let mut f = std::fs::File::create(&out_path).unwrap();
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, QIM_EMBED_QUALITY);
+            enc.encode(&img, img.width(), img.height(), image::ExtendedColorType::Rgb8).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(|| decode(&out_path));
+        assert!(result.is_ok(), "decode() panicked on a too-small-for-any-header cover");
+        assert!(result.unwrap().unwrap().is_none(), "a tiny plain cover should decode to no payload, not an error or a false positive");
+
+        let _ = std::fs::remove_file(&cover_path);
+        let _ = std::fs::remove_file(&out_path);
+    }
 }

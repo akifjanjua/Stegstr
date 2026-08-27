@@ -39,12 +39,16 @@ Bug #4 was confirmed the same way later, during the release-packaging pass
 (not originally verified when it was found and fixed -- see its own entry).
 Bug #6 (the Nostr signature gap) was confirmed via a source diff and grep
 against upstream rather than a build+run repro -- see its own entry.
-**5 of the 8 numbered bugs are confirmed pre-existing in pristine upstream:
-#1, #2, #4, #5, #6.** The remaining 3 (#3, #7, #8) are bugs in this fork's
+**5 of the 9 numbered bugs are confirmed pre-existing in pristine upstream:
+#1, #2, #4, #5, #6.** The next 3 (#3, #7, #8) are bugs in this fork's
 own new work -- QIM steganography and the Nostr publish-confirmation
 feature don't exist in upstream at all, so they can't be "pre-existing"
 there. Keep these two groups distinct; see `ROBUSTNESS_REPORT.md` for the
-full breakdown.
+full breakdown. Bug #9 is neither: its faulty line of code is identical to
+upstream's, but upstream has no second encoder and never promises
+extension-agnostic decoding, so the bug isn't actually reachable there --
+it only became a real, breakable promise once this fork's own dual-encoder
+`decode_any()` existed. Counted on its own, not folded into either tier.
 
 ## Backward compatibility
 
@@ -727,6 +731,41 @@ flush on reconnect); extending it to general events was not attempted here
 given the time available, since it's a real feature addition (a new
 persisted queue + flush wiring across every `publishViaRelay` call site)
 rather than a small fix.
+
+---
+
+## 9. Default decoder trusted the file extension instead of the file's actual content, breaking `decode_any()`'s own documented promise
+
+**Severity:** Medium. Not data loss and not a crash -- the payload is still there and still recoverable -- but a confusing, misleading failure for a case the CLI's own docs claim is handled ("you don't need to know which encoder produced an image you were sent").
+
+**Found by:** the post-Phase-4 regression sweep, re-running the adversarial corpus against the current binary. A default (non-`--robust`) embed writes genuine PNG bytes; naming that output `.jpg` (a plausible slip, since `--robust` output is documented as `.jpg`) made `decode`/`detect` fail entirely.
+
+**Repro:**
+```bash
+stegstr-cli embed cover.png -o out.jpg --payload "hello"   # writes real PNG bytes to a .jpg path
+stegstr-cli decode out.jpg
+# decode error: Format error decoding Jpeg: Error parsing image. Illegal start bytes:8950
+```
+The file is not corrupt -- `0x8950` is literally the start of a PNG signature (`\x89PNG`) misread as JPEG. Renaming the exact same bytes to `.png` decodes it correctly.
+
+**Root cause:** `decode_any()` (`lib.rs`) tries `stego_qim::decode()` first, which already sniffs the JPEG SOI marker directly from the bytes (bug #3's fix) -- so a QIM/JPEG file mislabeled `.png` decodes fine, content wins. But the DWT fallback, `stego::decode()`, loads the image via `load_image_with_orientation()`'s `ImageReader::open(path)`, which without `.with_guessed_format()` picks a decoder from the path's **extension**, not the bytes. A PNG mislabeled `.jpg` never reaches the correct decoder at all. This asymmetry -- one path content-sniffs, the other trusts the extension -- is what let this slip through: no test had tried embedding with one encoder and decoding with a mismatched extension.
+
+**Note on origin:** `load_image_with_orientation` is byte-for-byte identical to pristine upstream (`brunkstr/Stegstr` @ `ad2e10e`) -- confirmed by direct comparison, not assumed. The defect itself predates this fork. But upstream has only one encoder and never claims extension-agnostic decoding, so it has no real occasion to hit this; the bug only became reachable, and only broke a real promise, once this fork's `--robust`/QIM encoder and `decode_any()`'s "try both, extension doesn't matter" contract existed. Filed as its own entry rather than folded into either tier above -- it doesn't cleanly fit "pre-existing upstream bug" (upstream can't actually trigger it) or "bug in this fork's own new code" (the faulty line isn't new).
+
+**Fix:** `.with_guessed_format()` added to the `ImageReader` chain in `load_image_with_orientation`, so the actual magic bytes are sniffed the same way the QIM path already does.
+
+**Commit:** see the commit adding the extension-sniffing fix and its regression test in `stego.rs`.
+
+**Regression test:** `stego::tests::test_decode_ignores_misleading_extension` -- embeds real PNG bytes, deliberately saves them with a `.jpg` name, and confirms `decode()` still recovers the payload.
+
+## Post-Phase-4 regression pass: the other three checks, time-boxed
+
+Focused, not a full re-run -- only the code that changed since the original Phase 1 corpus sweep (adaptive delta, dual-format decode, the header bounds check). Bug #9 above is what it found; the other three checks came back clean:
+
+- **Adversarial corpus, re-run against the current binary.** ~28 files across the original manifest's categories (palette/16-bit/interlaced/CMYK/progressive/truncated/corrupt/empty/non-image/tiny/odd-dims/flat covers), both encoders, plus decoding each raw adversarial file directly -- 84 embed/decode/raw-decode operations, 0 crashes or hangs. This is what surfaced bug #9 (cross-checking outputs under mismatched extensions).
+- **Dual-format decoder, attacked directly.** `stego_qim::tests::test_dual_format_decode_survives_adversarial_header_bytes`: 300 trials of fully random bits written into both header and body coefficient slots (so the 24-bit reading, the 16-bit fallback, and whatever codeword length either derives from the noise are all attacker-controlled), decoded via the real public `decode()` wrapped in `catch_unwind`. `test_dual_format_decode_survives_truncated_tiny_cover` covers a cover too small to hold a header in either format. **0 panics** -- the bug #8 fix holds against exactly the class of input it was fixed for.
+- **`verifyEvent`, attacked with malformed events.** `nostr-event-verify.test.ts`'s new "malformed-input attack sweep": missing fields, null/wrong-typed id/pubkey/sig/tags/content/kind/created_at, oversized and undersized hex fields, huge payloads, deeply nested tags, `NaN`/`Infinity`, non-hex and non-ASCII-lookalike pubkeys, prototype-pollution-shaped extra fields -- 41 cases. **Every one resolves to `false`, none throw.**
+- **Diff audit (`origin/main` vs. pristine upstream) for debug prints, TODOs, commented-out code, leftover scratch files.** Clean: one `console.log` in a network test file (intentional -- it's meant to be read when a human runs it manually), no commented-out code, no scratch/temp files added anywhere in the diff. **One adjacent finding, not a code bug:** `Stegstr_Contest_Entry.pdf` is a real, intentionally-committed submission document (not scratch/garbage) that predates this entire campaign and is now stale -- it still describes the pre-hardening 20/20 and 45/45 results, doesn't mention any of the 9 bugs in this file (including the Nostr signature vulnerability, arguably the strongest finding of the whole campaign), and presents the WhatsApp live-send result without the pass-through-vs-survival distinction `BASELINE_RESULTS.md` later established. Not touched here -- rewriting the submission document is a content decision, not a regression fix.
 
 ---
 

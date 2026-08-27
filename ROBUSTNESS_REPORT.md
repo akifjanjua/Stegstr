@@ -12,11 +12,12 @@ this file summarizes and cross-references them rather than duplicating them.
 
 ## 1. Bugs found and fixed
 
-**8 numbered bugs** (4 Critical, 2 High, 2 Medium), all with repro steps,
-root cause, fix, commit hash, and a regression test in `BUGS.md`. Two
-distinct tiers, kept separate rather than merged into one number --
-"pre-existing in upstream" and "introduced by this fork's own new work"
-are different claims and are backed by different evidence:
+**9 numbered bugs** (4 Critical, 2 High, 3 Medium), all with repro steps,
+root cause, fix, commit hash, and a regression test in `BUGS.md`. Three
+groups, kept separate rather than merged into one number --
+"pre-existing in upstream," "introduced by this fork's own new work," and
+"upstream's code, but only reachable because of this fork's own work" are
+different claims and are backed by different evidence:
 
 **Tier 1 -- pre-existing in the upstream application (5 bugs), each
 verified by actually building and running a pristine clone of
@@ -39,6 +40,12 @@ upstream because the code they're in didn't exist there:**
 | 7 | Medium | Publish treated "1 of 5 relays confirmed" the same as "5 of 5" in the UI (a gap in this fork's own new confirmed-count feature) |
 | 8 | Critical | Old QIM images (pre-Phase-4, 16-bit header) failed to decode against the current binary -- and could crash the process (Reed-Solomon buffer underflow) -- **security-relevant**: a crafted/malformed header crashes the app on untrusted input |
 
+**Tier 3 -- upstream's own code, but the bug isn't reachable there (1 bug):**
+
+| # | Severity | Summary |
+|---|---|---|
+| 9 | Medium | Default decoder trusted the file extension over actual content, breaking `decode_any()`'s "you don't need to know which encoder produced it" promise -- the faulty line is identical to upstream's, but upstream has no second encoder and makes no such promise, so it can't actually hit this |
+
 Bugs #1, #2, #5 were confirmed against pristine upstream by directly
 embedding/decoding with the upstream binary and inspecting the (corrupted)
 output. Bug #4 was checked the same way during this packaging pass (not
@@ -49,10 +56,20 @@ by a byte-for-byte diff of `relay.ts`'s `onmessage` handler against
 upstream, plus a whole-tree grep for `verify`/`schnorr.verify`, both
 confirming it's the holder's own app's gap, not this fork's.
 
-Two of the eight are security issues, one in each tier: #6 (upstream,
-spoofable events) and #8 (this fork's own QIM work, crash on malformed
-input). They are not both "pre-existing in upstream" -- keeping that
-distinction is the point of the two tiers above.
+Two of the nine are security issues, one in each of the first two tiers:
+#6 (upstream, spoofable events) and #8 (this fork's own QIM work, crash on
+malformed input). They are not both "pre-existing in upstream" -- keeping
+that distinction is the point of the tiers above.
+
+**Post-Phase-4 regression pass (time-boxed, not a full re-run):** re-ran
+the adversarial corpus against the current binary (84 embed/decode/raw-
+decode operations across ~28 files, 0 crashes -- this is what found bug
+#9), attacked the dual-format decoder directly with 300 trials of random
+header/body coefficient noise plus a truncated-cover case (0 panics --
+the bug #8 fix holds), attacked `verifyEvent` with 41 malformed-event
+shapes (all rejected cleanly, none threw), and diffed `origin/main`
+against upstream for debug prints/TODOs/commented-out code/scratch files
+(clean). Full detail: `BUGS.md`'s "Post-Phase-4 regression pass" section.
 
 Additional findings documented but **not** fixed (flagged honestly rather
 than silently left out): no `CLOSED`/`NOTICE` handling in `relay.ts`, no
