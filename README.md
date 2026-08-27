@@ -70,6 +70,55 @@ You need [Rust](https://rustup.rs) (latest stable) to build the CLI, or use a do
 # you don't need to know which encoder produced an image you were sent.
 ```
 
+## AI agent operability
+
+The CLI and an MCP server are both first-class here, not an afterthought —
+[`skill/stegstr/`](skill/stegstr/) documents the full zero-human-input flow,
+and every claim below is verified against the real binary in
+`src-tauri/tests/cli_json_schema.rs` and [`tests/e2e/agent_smoke.sh`](tests/e2e/agent_smoke.sh).
+
+- **`--json` on every command** (`decode`, `detect`, `embed`, `post`,
+  `calibrate`) — exactly one JSON object on stdout, no prose mixed in.
+  Schemas are committed at [`schema/cli/`](schema/cli/) and validated
+  against the actual binary in CI-runnable tests, not just documented and
+  hoped-for.
+- **Documented, stable exit codes**:
+
+  | Code | Meaning |
+  |---|---|
+  | `0` | Success |
+  | `1` | Invalid usage or an otherwise-unclassified error |
+  | `2` | Capacity exceeded — payload doesn't fit the cover |
+  | `3` | No payload found in the image |
+  | `4` | Decryption failure (`--encrypt`/`--decrypt`) |
+  | `5` | Malformed input (unreadable image, bad base64/hex, non-UTF-8 text) |
+
+  In `--json` mode the exit code always matches the emitted `error.kind`.
+- **No interactive prompts, ever** — nothing in this CLI reads stdin
+  interactively, on a TTY or not. `--yes` is accepted everywhere as a
+  no-op, for scripts that want to pass it defensively.
+- **`stegstr-cli calibrate`** — channel fingerprinting: compare a sent
+  original against the file received back after a real platform round
+  trip, and infer that platform's actual re-encode pipeline (resize rule;
+  exact JPEG quality recovered from quantization tables, or a clearly
+  labeled best-fit estimate when it isn't exact; chroma subsampling;
+  progressive/baseline; whether metadata was stripped). Verified against
+  this repo's own real captured Instagram and WhatsApp evidence in
+  [`live_test/`](live_test/) — correctly recovered exact JPEG quality for
+  both, and independently inferred WhatsApp's ~1600px longest-side resize
+  from pixel dimensions alone.
+- **`stegstr-cli mcp`** — an MCP server over stdio (built on the official
+  [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) SDK) exposing
+  `embed`, `decode`, `detect`, and `calibrate` as tools, each with a typed
+  input schema and description, returning the identical JSON shape as the
+  matching CLI command.
+
+**What isn't included in this pass, honestly:** binary-safe stdin/stdout
+piping for `embed`/`detect`, and a `--seed` flag for deterministic output
+where randomness is used (event keys, the QIM permutation) — both are in
+the original AI-agent-operability brief but weren't built here; flagged as
+open scope, not silently dropped.
+
 ## Verify it yourself
 
 ```bash
@@ -108,6 +157,8 @@ Binary: `target/release/stegstr-cli` (Windows: `stegstr-cli.exe`).
 - [Robustness report](ROBUSTNESS_REPORT.md) — before/after numbers, live-platform confirmation, what wasn't tested
 - [Bugs found and fixed](BUGS.md) — 9 bugs (5 pre-existing upstream, 3 in this fork's own work, 1 that's neither), repro steps, root cause, fix, regression test each
 - [Evidence images](docs/evidence/) — visual proof of the image-destruction bug, upstream vs. fixed
+- [Agent skill](skill/stegstr/) — zero-human-input CLI/MCP workflow for AI agents, every command verified
+- [CLI JSON schemas](schema/cli/) — `--json` output shapes for every command
 - [What changed in this fork and why](ROBUSTNESS_PORT_NOTES.md)
 - [Website](https://stegstr.com) — Downloads, getting started, wiki (this is the original upstream project's site, not this fork's)
 - [Wiki / CLI docs](https://stegstr.com/wiki/cli.html) — Full CLI reference

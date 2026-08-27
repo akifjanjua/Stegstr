@@ -768,6 +768,108 @@ Focused, not a full re-run -- only the code that changed since the original Phas
 
 ---
 
+## Phase 7: AI agent operability (feature, not a bug fix)
+
+Not a bug -- STEGSTR_BRIEF.md's Phase 7 asked for the CLI and an MCP server
+to actually match what `skill/stegstr/` and `agents.txt` already claimed.
+Summary; see README.md's "AI agent operability" section and
+`skill/stegstr/SKILL.md` for the user-facing documentation, all verified
+against the real binary, not just written.
+
+- **`--json` on `decode`/`detect`/`embed`/`post`/`calibrate`.** Exactly one
+  JSON object on stdout per command, nothing else. Schemas committed at
+  `schema/cli/*.schema.json`, validated against the real compiled binary in
+  `src-tauri/tests/cli_json_schema.rs` (both success and every error path,
+  for every command).
+- **Exit codes**, source-verified rather than guessed: each classification
+  in `stegstr_cli/main.rs`'s `classify_decode_error`/`classify_encode_error`/
+  `classify_crypto_error` is tied to an exact, cited error literal from
+  `stego.rs`/`stego_qim.rs`/`stego_crypto.rs` (e.g. capacity errors always
+  start with the literal `"Payload too large"` in both encoders) --
+  matched at the specific call site that can produce that error, not by
+  sniffing arbitrary error text for keywords. All 4 non-generic codes
+  (`2` capacity exceeded, `3` no payload found, `4` decryption failure,
+  `5` malformed input) were each triggered for real, not just asserted:
+  `2` via a 50KB payload against a 32x32 cover, `3` via decoding an
+  unembedded image, `4` via `--decrypt` on a non-encrypted payload, `5` via
+  decoding a non-image file.
+- **No interactive prompts.** Grepped: nothing in this CLI ever read stdin
+  interactively before this work either -- `--yes` is now an explicit,
+  documented no-op flag and `is_noninteractive()` is the enforcement point
+  for any future prompt, rather than there being no guard at all.
+- **`calibrate`** (new feature, STEGSTR_BRIEF.md section 5.2): a pure-Rust
+  JPEG marker-segment parser (`jpeg_probe.rs`, deliberately separate from
+  `stego_qim.rs`'s hardened libjpeg FFI wrapper -- no coefficient access
+  needed, so no reason to add risk to that surface) recovers quantization
+  tables, chroma sampling factors, and progressive/baseline directly from
+  JPEG marker bytes. JPEG quality is estimated by matching the recovered
+  luma table against the standard IJG quality-scaling curve; reported as
+  `jpeg_quality_exact: true` only on a byte-exact match, a labeled best-fit
+  estimate otherwise -- never claimed as exact when it isn't. **Verified
+  against this repo's own real captured evidence, not synthetic covers**:
+  run against `live_test/send_instagram.jpg` /
+  `live_test/received/received_instagram.jpg`, recovered JPEG quality 80
+  (exact) and chroma subsampling 4:4:4; against the WhatsApp control pair
+  (`live_test/control/control_whatsapp_original.jpg` /
+  `live_test/received/received_control_whatsapp.jpg`), recovered quality 92
+  (exact), chroma 4:2:0, and independently inferred a resize rule of
+  "uniform downscale, max side 1920 -> 1600" from pixel dimensions alone --
+  which matches WhatsApp's independently-known ~1600px longest-side cap, a
+  real corroborating signal the inference is measuring something true, not
+  just self-consistent.
+- **`stegstr-cli mcp`**: an MCP server over stdio using the official `rmcp`
+  SDK (`modelcontextprotocol/rust-sdk`), exposing `embed`, `decode`,
+  `detect`, `calibrate` as tools with typed input schemas (via `schemars`)
+  and descriptions. Verified end-to-end by hand: `initialize` handshake,
+  `tools/list` (returns exactly these 4 tools), and sequenced `tools/call`
+  round trips (`embed` then `decode` its own output) all produce correct
+  results. **Finding during verification, not a defect:** the server
+  processes concurrent `tools/call` requests genuinely concurrently
+  (responses matched by JSON-RPC `id`, not send order) -- a client that
+  fires a `decode` for a file before that file's `embed` response has come
+  back will race it. Documented in `SKILL.md`'s MCP section for anyone
+  driving the server by hand over a raw pipe rather than a real MCP client
+  (which naturally waits for each response it needs).
+- **`skill/stegstr/`**: `SKILL.md` and `README.md` rewritten to document
+  `--json`, exit codes, `calibrate`, and `mcp` -- and, per explicit
+  instruction, every single command block in the rewritten `SKILL.md` was
+  actually run against the compiled binary and its real output compared to
+  what's documented, not proofread from memory. One stale-claim class this
+  caught: `post --json`'s output is `{"ok":true,"bundle":{...},"output_path":...}`,
+  not the bare bundle -- an early draft's example workflow would have had
+  an agent embed that whole wrapper (including `"ok"`/`"output_path"`) as
+  the payload instead of unwrapping `bundle` first. Caught before it shipped.
+- **`tests/e2e/agent_smoke.sh`**: headless, no human -- `post` ->
+  unwrap `bundle` -> `embed --robust --json` -> `decode --json` ->
+  `detect --json` -> `calibrate --json` against real `live_test/` evidence
+  -> `mcp` `tools/list` -> all 4 documented non-zero exit codes each
+  actually triggered. 10/10 passing, confirmed stable across repeated runs.
+  Building it surfaced two real script-level bugs before they could mislead
+  anyone reusing this as a template: (1) the same wrapper-vs-`bundle`
+  unwrapping mistake described above, and (2) a genuine timing race in
+  driving `stegstr-cli mcp` over a plain shell pipe -- closing stdin the
+  instant the last request is written can race the server's still-in-flight
+  final response and silently drop it. Both fixed in the script and
+  documented in `SKILL.md` so nobody else has to rediscover them.
+
+**What isn't included in this pass, honestly:** STEGSTR_BRIEF.md's Phase 7
+also asks for binary-safe stdin/stdout piping (so `embed`/`detect` compose
+in a shell pipeline) and a `--seed` flag for deterministic output wherever
+randomness is used (Nostr key generation in `post`, the QIM permutation).
+Neither was built here -- flagged as open scope rather than silently
+dropped, same as every other documented gap in this file.
+
+**Regression tests:** `src-tauri/src/bin/stegstr_cli/main.rs`'s
+`classify_*`/`strip_global_flags`/`is_noninteractive` unit tests;
+`src-tauri/src/bin/stegstr_cli/calibrate.rs`'s `resize_rule_*` unit tests;
+`src-tauri/src/jpeg_probe.rs`'s quality-estimation and chroma-subsampling
+unit tests (including an exact-recovery round trip at 5 quality levels);
+`src-tauri/tests/cli_json_schema.rs` (schema validation against the real
+binary, success and error paths, all 5 JSON-emitting commands);
+`tests/e2e/agent_smoke.sh` (the full headless flow).
+
+---
+
 ## Also investigated, not a bug
 
 - **`--payload-base64` has no `@file` form.** `--payload @file` requires the

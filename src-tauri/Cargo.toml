@@ -21,7 +21,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "stegstr-cli"
-path = "src/bin/stegstr_cli.rs"
+path = "src/bin/stegstr_cli/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -43,7 +43,12 @@ secp256k1 = { version = "0.28", features = ["rand-std"] }
 hex = "0.4"
 mozjpeg-sys = "2"
 reed-solomon = "0.2"
+toml = "0.8"
+rmcp = { version = "0.3", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+schemars = "1.0"
 
 [dev-dependencies]
 proptest = "1"
+jsonschema = "0.30"
 

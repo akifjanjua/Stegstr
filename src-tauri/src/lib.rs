@@ -1,3 +1,4 @@
+pub mod jpeg_probe;
 pub mod stego;
 pub mod stego_crypto;
 pub mod stego_dot;
