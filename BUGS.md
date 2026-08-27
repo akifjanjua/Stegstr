@@ -675,8 +675,7 @@ range end index 18446744073709551492 out of range for slice of length 4
   pre-existing residual gap as before -- `pure_solid_white` on WhatsApp,
   unrelated to this fix, not a new regression).
 
-**Commit:** see the commit adding `QIM_LEGACY_HEADER_BITS` and the
-`rs::decode` bounds check in `stego_qim.rs`.
+**Commit:** `1fb3e0c`
 
 **Regression test:** `stego_qim::tests::test_legacy_16bit_header_still_decodes`
 -- reproduces the legacy 16-bit-header encoder inline (the current `encode()`
@@ -754,7 +753,7 @@ The file is not corrupt -- `0x8950` is literally the start of a PNG signature (`
 
 **Fix:** `.with_guessed_format()` added to the `ImageReader` chain in `load_image_with_orientation`, so the actual magic bytes are sniffed the same way the QIM path already does.
 
-**Commit:** see the commit adding the extension-sniffing fix and its regression test in `stego.rs`.
+**Commit:** `5489857`
 
 **Regression test:** `stego::tests::test_decode_ignores_misleading_extension` -- embeds real PNG bytes, deliberately saves them with a `.jpg` name, and confirms `decode()` still recovers the payload.
 
