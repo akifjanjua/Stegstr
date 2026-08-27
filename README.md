@@ -1,6 +1,10 @@
 # Stegstr
 
+<!-- Demo video slot: STEGSTR_VIDEO_ENTRY_BRIEF.md's shot list, once recorded. -->
+
 **Steganographic social networking.** Hide messages in images and share them anywhere—local-first, with optional Nostr sync.
+
+**This fork adds JPEG-domain (QIM) steganography that survives WhatsApp and Instagram recompression** (the original PNG/DWT embedding does not -- upstream's own docs say to avoid JPEG). See [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md) for the full before/after numbers, live-platform confirmation, and an honest "what we did not test" section, or [`BUGS.md`](BUGS.md) for the 8 bugs found and fixed along the way.
 
 Stegstr gives you two ways to use it:
 
@@ -38,6 +42,34 @@ Binary: `target/release/stegstr-cli` (Windows: `stegstr-cli.exe`). Example:
 ./target/release/stegstr-cli detect out.png
 ```
 
+**Sending through WhatsApp, Instagram, or Telegram?** Add `--robust` -- it
+switches to the JPEG/DCT (QIM) encoder, which is built to survive those
+platforms' own re-compression (the example above, without `--robust`, does
+not survive being re-uploaded). Output is always a `.jpg`:
+
+```bash
+./target/release/stegstr-cli embed cover.jpg -o out.jpg --robust --payload "hello world"
+# send out.jpg through WhatsApp/Instagram/Telegram, download the received copy, then:
+./target/release/stegstr-cli decode received.jpg
+# decode tries the robust JPEG/QIM decoder first, then falls back to PNG/DWT --
+# you don't need to know which encoder produced an image you were sent.
+```
+
+See [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md) for what "survives" is
+actually backed by (live sends, not just simulation, with the mechanism
+behind each result spelled out).
+
+## Verify it yourself
+
+```bash
+./scripts/verify.sh     # clean clone -> Rust build/test/clippy -> npm test -> full channel matrix
+./scripts/demo.sh        # fixed cover, fixed payload: embed + decode round trip
+```
+
+Windows: `scripts\verify.ps1` (same steps, PowerShell). Needs Rust, and
+optionally Node.js + Python for the frontend tests and channel-simulator
+matrix (skippable: `./scripts/verify.sh --skip-python`).
+
 ## Build from source (full app)
 
 Prerequisites: Node.js 18+, Rust (latest stable).
@@ -56,6 +88,8 @@ See the repo for platform-specific build deps (e.g. Xcode CLI tools, Visual Stud
 - [Website](https://stegstr.com) — Downloads, getting started, wiki (this is the original upstream project's site, not this fork's)
 - [Wiki / CLI docs](https://stegstr.com/wiki/cli.html) — Full CLI reference
 - [This fork's source](https://github.com/akifjanjua/Stegstr)
+- [Robustness report](ROBUSTNESS_REPORT.md) — before/after numbers, live-platform confirmation, what wasn't tested
+- [Bugs found and fixed](BUGS.md) — 8 bugs, repro steps, root cause, fix, regression test each
 - [What changed in this fork and why](ROBUSTNESS_PORT_NOTES.md)
 
 ## License
