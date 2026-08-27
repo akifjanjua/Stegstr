@@ -55,11 +55,13 @@ Status snapshot for the `hardening` branch, `STEGSTR_ENTRY_V3.md` campaign.
   attacked with 41 malformed-event shapes (all rejected cleanly, none
   threw); diff audit of `origin/main` vs. upstream for debug prints/TODOs/
   scratch files (clean). One adjacent finding, not a code bug:
-  `Stegstr_Contest_Entry.pdf` is a real committed document, predates this
-  campaign, and is now stale (pre-hardening numbers, missing the bug
-  count, missing the WhatsApp pass-through distinction) -- not rewritten
-  here, flagged for whoever finalizes the submission text.
+  `Stegstr_Contest_Entry.pdf` was a real committed document that predated
+  this campaign and had gone stale (pre-hardening numbers, missing the
+  bug count, missing the WhatsApp pass-through distinction) -- deleted;
+  README.md is now the single current entry document.
+- **v0.1.1 cut** to ship bug #9's fix (v0.1.0's binaries predated it).
+  v0.1.0 left in place, not deleted. README download links use
+  `/releases/latest/download/...`, so they resolve to v0.1.1 automatically.
 
-**Open items, in priority order:** decide what to do with the stale entry
-PDF, Telegram live send, video recording (shot list in
-`STEGSTR_VIDEO_ENTRY_BRIEF.md`), entry description text.
+**Open items, in priority order:** Telegram live send, video recording
+(shot list in `STEGSTR_VIDEO_ENTRY_BRIEF.md`), entry description text.
