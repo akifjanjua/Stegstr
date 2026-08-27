@@ -62,6 +62,33 @@ Status snapshot for the `hardening` branch, `STEGSTR_ENTRY_V3.md` campaign.
 - **v0.1.1 cut** to ship bug #9's fix (v0.1.0's binaries predated it).
   v0.1.0 left in place, not deleted. README download links use
   `/releases/latest/download/...`, so they resolve to v0.1.1 automatically.
+- **AI agent operability** (STEGSTR_BRIEF.md's Phase 7; highest-priority
+  remaining item at the time it was picked up, nothing existed for it
+  before): `--json` on decode/detect/embed/post/calibrate, schemas
+  committed under `schema/cli/` and validated against the real binary in
+  `src-tauri/tests/cli_json_schema.rs`; documented, source-verified exit
+  codes (0/1/2/3/4/5); no interactive prompts, now guarded, not just
+  absent; new `calibrate` command (channel fingerprinting) verified
+  against this repo's own real captured `live_test/` evidence -- exact
+  JPEG quality recovery (80 for Instagram, 92 for the WhatsApp control)
+  and an independently-correct inference of WhatsApp's ~1600px resize cap
+  from pixel dimensions alone; new `mcp` command, a stdio MCP server on
+  the official `rmcp` SDK exposing embed/decode/detect/calibrate, verified
+  with real `initialize`/`tools/list`/`tools/call` round trips;
+  `skill/stegstr/` rewritten with every command block actually run against
+  the compiled binary (caught a real stale-claim risk: `post --json`'s
+  wrapper vs. the bare bundle); `tests/e2e/agent_smoke.sh` added, 10/10
+  passing, stable across repeated runs. Not built, flagged as open scope
+  rather than dropped silently: binary-safe stdin/stdout piping for
+  embed/detect, `--seed` for deterministic output. Full detail: `BUGS.md`'s
+  "Phase 7" entry, `README.md`'s "AI agent operability" section.
+- **v0.1.2 cut** to ship the above. First release-build attempt failed CI
+  on all 3 platforms (a known Tauri limitation with multiple `[[bin]]`
+  targets, triggered by this work's original module layout) -- caught by
+  watching the actual CI run rather than assuming success, root-caused,
+  fixed, re-verified, and the broken tag replaced before anything public
+  was affected (no release was ever published from the failed build). See
+  `BUGS.md`'s "Phase 7" entry for the full account.
 
 **Open items, in priority order:** Telegram live send, video recording
 (shot list in `STEGSTR_VIDEO_ENTRY_BRIEF.md`), entry description text.
