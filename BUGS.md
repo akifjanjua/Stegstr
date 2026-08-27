@@ -782,7 +782,7 @@ against the real binary, not just written.
   `src-tauri/tests/cli_json_schema.rs` (both success and every error path,
   for every command).
 - **Exit codes**, source-verified rather than guessed: each classification
-  in `stegstr_cli/main.rs`'s `classify_decode_error`/`classify_encode_error`/
+  in `stegstr_cli.rs`'s `classify_decode_error`/`classify_encode_error`/
   `classify_crypto_error` is tied to an exact, cited error literal from
   `stego.rs`/`stego_qim.rs`/`stego_crypto.rs` (e.g. capacity errors always
   start with the literal `"Payload too large"` in both encoders) --
@@ -859,14 +859,36 @@ randomness is used (Nostr key generation in `post`, the QIM permutation).
 Neither was built here -- flagged as open scope rather than silently
 dropped, same as every other documented gap in this file.
 
-**Regression tests:** `src-tauri/src/bin/stegstr_cli/main.rs`'s
+**Regression tests:** `src-tauri/src/bin/stegstr_cli.rs`'s
 `classify_*`/`strip_global_flags`/`is_noninteractive` unit tests;
-`src-tauri/src/bin/stegstr_cli/calibrate.rs`'s `resize_rule_*` unit tests;
+`src-tauri/src/bin_support/calibrate.rs`'s `resize_rule_*` unit tests;
 `src-tauri/src/jpeg_probe.rs`'s quality-estimation and chroma-subsampling
 unit tests (including an exact-recovery round trip at 5 quality levels);
 `src-tauri/tests/cli_json_schema.rs` (schema validation against the real
 binary, success and error paths, all 5 JSON-emitting commands);
 `tests/e2e/agent_smoke.sh` (the full headless flow).
+
+**Caught only by watching the real release CI run, not by any local
+check:** the first attempt at this work organized `calibrate`/`mcp` as
+`src/bin/stegstr_cli/{calibrate,mcp}.rs` (Rust's normal directory-module
+form for a binary). `cargo build`/`test`/`clippy` all passed cleanly with
+that layout -- but the actual `v0.1.2` release build failed on all 3
+platforms: Tauri's bundler (deb confirmed, msi/dmg share the underlying
+code path) tried to copy a binary literally named `stegstr_cli` into the
+package and errored that it doesn't exist, because cargo actually produces
+`stegstr-cli` -- the name this crate's `[[bin]]` section has always
+declared. This is a known Tauri limitation with multiple `[[bin]]` targets
+in one package (`tauri-apps/tauri` discussion #7592); the directory-module
+switch was enough to trigger it even though the declared bin name never
+changed. Fixed by reverting to the flat `src/bin/stegstr_cli.rs` layout
+that built cleanly for v0.1.0/v0.1.1, with `calibrate.rs`/`mcp.rs` moved to
+a new `src/bin_support/` directory (outside `src/bin/`, so cargo's binary
+auto-discovery never treats them as their own targets) and pulled in via
+`#[path]`. No source changes beyond the module wiring; same 29/29 tests,
+same clean clippy, same 10/10 `agent_smoke.sh`. The original `v0.1.2` tag
+was deleted and recreated pointing at the fix -- no release was ever
+published from the broken build, confirmed via `gh release view` before
+deleting it.
 
 ---
 
