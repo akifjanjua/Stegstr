@@ -1,7 +1,7 @@
 //! Stegstr CLI: headless decode, embed, detect, post, and calibrate for
 //! scripts and AI agents. Build with: cargo build --release --bin stegstr-cli
 //!
-//! Agent-operability contract (see README.md "CLI for agents" and
+//! Agent-operability contract (see README.md "AI agent operability" and
 //! schema/cli/*.schema.json for the exact shapes):
 //! - `--json` on every command: exactly one JSON object on stdout, nothing
 //!   else. Human-readable prose only ever goes to stderr, and only when
