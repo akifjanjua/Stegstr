@@ -13,25 +13,46 @@ this file summarizes and cross-references them rather than duplicating them.
 ## 1. Bugs found and fixed
 
 **8 numbered bugs** (4 Critical, 2 High, 2 Medium), all with repro steps,
-root cause, fix, commit hash, and a regression test in `BUGS.md`:
+root cause, fix, commit hash, and a regression test in `BUGS.md`. Two
+distinct tiers, kept separate rather than merged into one number --
+"pre-existing in upstream" and "introduced by this fork's own new work"
+are different claims and are backed by different evidence:
+
+**Tier 1 -- pre-existing in the upstream application (5 bugs), each
+verified by actually building and running a pristine clone of
+`brunkstr/Stegstr` @ `ad2e10e`, not inferred from shared code:**
 
 | # | Severity | Summary |
 |---|---|---|
 | 1 | Critical | Default DWT decode returned silently corrupted payloads on covers >= 256px |
 | 2 | High | DWT decode flipped bits on high-contrast/noisy covers (unguarded clamping) |
-| 3 | Medium | Malformed-JPEG decode leaked a file handle + libjpeg memory pool every attempt |
 | 4 | High | `decode()`'s tile-aligned search silently skipped for extreme aspect ratios |
 | 5 | Critical | `encode()` wrote every non-leftmost tile's pixels from the wrong source column -- visible image corruption, not just imperfect invisibility |
-| 6 | Critical | Received Nostr events were never cryptographically verified (confirmed pre-existing in pristine upstream, not fork-introduced) |
-| 7 | Medium | Publish treated "1 of 5 relays confirmed" the same as "5 of 5" in the UI |
-| 8 | Critical | Old QIM images (pre-Phase-4, 16-bit header) failed to decode against the current binary -- and could crash the process (Reed-Solomon buffer underflow) |
+| 6 | Critical | Received Nostr events were never cryptographically verified -- **security issue**: allows event spoofing/impersonation |
 
-Two of these (#1, #5) were independently reproduced against a fresh build of
-**pristine upstream** (`brunkstr/Stegstr` @ `ad2e10e`), not just diffed --
-confirming they predate this fork rather than being introduced by it. Bug #6
-(the Nostr signature gap) was verified the same way: a byte-for-byte diff of
-`relay.ts`'s `onmessage` handler against upstream, plus a whole-tree grep for
-`verify`/`schnorr.verify`, both confirming it's the holder's own app's gap.
+**Tier 2 -- bugs in this fork's own new work (3 bugs), not present in
+upstream because the code they're in didn't exist there:**
+
+| # | Severity | Summary |
+|---|---|---|
+| 3 | Medium | Malformed-JPEG decode (new QIM/libjpeg FFI path) leaked a file handle + libjpeg memory pool every attempt |
+| 7 | Medium | Publish treated "1 of 5 relays confirmed" the same as "5 of 5" in the UI (a gap in this fork's own new confirmed-count feature) |
+| 8 | Critical | Old QIM images (pre-Phase-4, 16-bit header) failed to decode against the current binary -- and could crash the process (Reed-Solomon buffer underflow) -- **security-relevant**: a crafted/malformed header crashes the app on untrusted input |
+
+Bugs #1, #2, #5 were confirmed against pristine upstream by directly
+embedding/decoding with the upstream binary and inspecting the (corrupted)
+output. Bug #4 was checked the same way during this packaging pass (not
+originally verified when found -- only assumed plausible since it shares
+the same tiling code as #1 -- then actually built and run to confirm,
+same corruption signature). Bug #6 (the Nostr signature gap) was verified
+by a byte-for-byte diff of `relay.ts`'s `onmessage` handler against
+upstream, plus a whole-tree grep for `verify`/`schnorr.verify`, both
+confirming it's the holder's own app's gap, not this fork's.
+
+Two of the eight are security issues, one in each tier: #6 (upstream,
+spoofable events) and #8 (this fork's own QIM work, crash on malformed
+input). They are not both "pre-existing in upstream" -- keeping that
+distinction is the point of the two tiers above.
 
 Additional findings documented but **not** fixed (flagged honestly rather
 than silently left out): no `CLOSED`/`NOTICE` handling in `relay.ts`, no

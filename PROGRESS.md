@@ -3,15 +3,20 @@
 Status snapshot for the `hardening` branch, `STEGSTR_ENTRY_V3.md` campaign.
 
 - **Phase 1 (break it):** 8 numbered bugs found and fixed (4 Critical, 2
-  High, 2 Medium), all with regression tests. 2 confirmed pre-existing in
-  pristine upstream, not fork-introduced. See `BUGS.md`.
+  High, 2 Medium), all with regression tests. Two tiers, kept distinct:
+  5 confirmed pre-existing in pristine upstream (#1, #2, #4, #5, #6, each
+  verified by building and running a pristine clone or diffing against
+  it), 3 introduced by this fork's own new work (#3, #7, #8 -- bugs in
+  code upstream doesn't have at all). One security issue in each tier
+  (#6: spoofable events; #8: crash on malformed input). See `BUGS.md`.
 - **Phase 2 (environments):** Windows/macOS/Ubuntu release builds green in
   real CI (manually dispatched, run `32971568821`). MSRV 1.88.0 declared and
-  actually verified. 8 npm vulnerabilities fixed. `.claude/` audited (see
+  actually verified. 8 npm vulnerabilities fixed (1 critical). Broken
+  mobile-android submodule (failing every CI checkout) removed and
+  documented. Outdated GitHub Actions bumped. `.claude/` audited (see
   git history for anything contest-strategy-specific, kept out of the
   working tree). Node 18/20 matrix configured but never actually executed
-  (see `ROBUSTNESS_REPORT.md`, "what we did not test"). No tag pushed, no
-  release cut -- standing constraint, repo owner's call.
+  (see `ROBUSTNESS_REPORT.md`, "what we did not test").
 - **Phase 3 (networking under failure):** Nostr event signature
   verification added (bug #6, confirmed pre-existing upstream gap).
   Verified not overly strict: 100/100 real relay events accepted. Partial

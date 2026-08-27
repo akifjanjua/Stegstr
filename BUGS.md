@@ -35,6 +35,17 @@ during this verification pass -- not assumed, actually reproduced by
 embedding with the upstream binary and inspecting the output. See each bug's
 entry for specifics.
 
+Bug #4 was confirmed the same way later, during the release-packaging pass
+(not originally verified when it was found and fixed -- see its own entry).
+Bug #6 (the Nostr signature gap) was confirmed via a source diff and grep
+against upstream rather than a build+run repro -- see its own entry.
+**5 of the 8 numbered bugs are confirmed pre-existing in pristine upstream:
+#1, #2, #4, #5, #6.** The remaining 3 (#3, #7, #8) are bugs in this fork's
+own new work -- QIM steganography and the Nostr publish-confirmation
+feature don't exist in upstream at all, so they can't be "pre-existing"
+there. Keep these two groups distinct; see `ROBUSTNESS_REPORT.md` for the
+full breakdown.
+
 ## Backward compatibility
 
 Concern: bug #5's fix changes embedding semantics (skipping infeasible
@@ -375,6 +386,15 @@ failure as bug #1, just for a shape the `&&` guard exempted.
 it's replayed on every future run before any new cases are generated).
 Verified with a follow-up 500-case run (`PROPTEST_CASES=500`), plus the full
 corpus and 252-case stress sweep, all still 0 mismatches.
+
+**Confirmed present in pristine upstream.** Not checked at the time this
+bug was originally found and fixed -- verified afterward, during the
+release-packaging pass, rather than left as an assumed "probably, since
+it's the same shared tiling code as #1". Built `brunkstr/Stegstr` @
+`ad2e10e` and ran the exact repro above (258x8 cover, same payload)
+against it directly: output is corrupted with the same signature (a
+correct `01234` prefix, then garbage) as this fork's pre-fix behavior.
+Confirmed by actually running it, not inferred from the shared root cause.
 
 ---
 

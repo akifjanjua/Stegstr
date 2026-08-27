@@ -4,7 +4,7 @@
 
 **Steganographic social networking.** Hide messages in images and share them anywhere—local-first, with optional Nostr sync.
 
-**This fork adds JPEG-domain (QIM) steganography that survives WhatsApp and Instagram recompression** (the original PNG/DWT embedding does not -- upstream's own docs say to avoid JPEG). See [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md) for the full before/after numbers, live-platform confirmation, and an honest "what we did not test" section, or [`BUGS.md`](BUGS.md) for the 8 bugs found and fixed along the way.
+**This fork adds JPEG-domain (QIM) steganography that survives WhatsApp and Instagram recompression** (the original PNG/DWT embedding does not -- upstream's own docs say to avoid JPEG). See [`ROBUSTNESS_REPORT.md`](ROBUSTNESS_REPORT.md) for the full before/after numbers, live-platform confirmation, and an honest "what we did not test" section, or [`BUGS.md`](BUGS.md) for the 8 bugs found and fixed along the way — 5 pre-existing in the upstream application (each verified against a pristine clone of `brunkstr/Stegstr`), 3 in this fork's own new work, one security issue in each.
 
 Stegstr gives you two ways to use it:
 
@@ -102,7 +102,7 @@ See the repo for platform-specific build deps (e.g. Xcode CLI tools, Visual Stud
 - [Wiki / CLI docs](https://stegstr.com/wiki/cli.html) — Full CLI reference
 - [This fork's source](https://github.com/akifjanjua/Stegstr)
 - [Robustness report](ROBUSTNESS_REPORT.md) — before/after numbers, live-platform confirmation, what wasn't tested
-- [Bugs found and fixed](BUGS.md) — 8 bugs, repro steps, root cause, fix, regression test each
+- [Bugs found and fixed](BUGS.md) — 8 bugs (5 pre-existing upstream, 3 in this fork's own work), repro steps, root cause, fix, regression test each
 - [What changed in this fork and why](ROBUSTNESS_PORT_NOTES.md)
 
 ## License
